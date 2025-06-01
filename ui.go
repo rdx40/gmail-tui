@@ -1,0 +1,921 @@
+package main
+
+import (
+	"encoding/base64"
+	"fmt"
+	"log"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	"google.golang.org/api/gmail/v1"
+)
+
+type state int
+
+const (
+	inbox state = iota
+	viewing
+	loading
+	composing
+	replying
+	searching
+	managingLabels
+)
+
+type keyMap struct {
+	Back        key.Binding
+	Reply       key.Binding
+	Compose     key.Binding
+	Delete      key.Binding
+	Search      key.Binding
+	Labels      key.Binding
+	ToggleRead  key.Binding
+	Quit        key.Binding
+	Send        key.Binding
+	NextInput   key.Binding
+	PrevInput   key.Binding
+	ShowHelp    key.Binding
+	CloseHelp   key.Binding
+}
+func (k keyMap) ShortHelp() []key.Binding {
+	return []key.Binding{
+		k.ShowHelp, k.Compose, k.Search, k.Labels, k.Quit,
+	}
+}
+
+func (k keyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{
+		{k.Compose, k.Reply, k.Search, k.Labels},
+		{k.Delete, k.ToggleRead, k.Back, k.Quit},
+		{k.Send, k.NextInput, k.PrevInput},
+		{k.ShowHelp, k.CloseHelp},
+	}
+}
+
+var keys = keyMap{
+	Back: key.NewBinding(
+		key.WithKeys("b", "esc"),
+		key.WithHelp("b/esc", "back"),
+	),
+	Reply: key.NewBinding(
+		key.WithKeys("r"),
+		key.WithHelp("r", "reply"),
+	),
+	Compose: key.NewBinding(
+		key.WithKeys("c"),
+		key.WithHelp("c", "compose"),
+	),
+	Delete: key.NewBinding(
+		key.WithKeys("d"),
+		key.WithHelp("d", "delete"),
+	),
+	Search: key.NewBinding(
+		key.WithKeys("/"),
+		key.WithHelp("/", "search"),
+	),
+	Labels: key.NewBinding(
+		key.WithKeys("l"),
+		key.WithHelp("l", "labels"),
+	),
+	ToggleRead: key.NewBinding(
+		key.WithKeys("m"),
+		key.WithHelp("m", "mark read/unread"),
+	),
+	Quit: key.NewBinding(
+		key.WithKeys("q", "ctrl+c"),
+		key.WithHelp("q", "quit"),
+	),
+	Send: key.NewBinding(
+		key.WithKeys("ctrl+s"),
+		key.WithHelp("ctrl+s", "send"),
+	),
+	NextInput: key.NewBinding(
+		key.WithKeys("tab"),
+		key.WithHelp("tab", "next field"),
+	),
+	PrevInput: key.NewBinding(
+		key.WithKeys("shift+tab"),
+		key.WithHelp("shift+tab", "prev field"),
+	),
+	ShowHelp: key.NewBinding(
+		key.WithKeys("?"),
+		key.WithHelp("?", "help"),
+	),
+	CloseHelp: key.NewBinding(
+		key.WithKeys("?"),
+		key.WithHelp("?", "close help"),
+	),
+}
+
+type emailItem struct {
+	id        string
+	threadId  string
+	subject   string
+	from      string
+	snippet   string
+	date      string
+	labels    []string
+	isUnread  bool
+	body      string
+	recipient string
+}
+
+func (e emailItem) Title() string {
+	if e.isUnread {
+		return "● " + e.subject
+	}
+	return "  " + e.subject
+}
+func (e emailItem) Description() string {
+	return fmt.Sprintf("%s - %s", e.from, e.snippet)
+}
+func (e emailItem) FilterValue() string { return e.subject + " " + e.from }
+
+//expanded model
+type model struct {
+	state       state
+	list        list.Model
+	srv         *gmail.Service
+	fullEmail   string
+	loading     spinner.Model
+	viewport    viewport.Model
+	width       int
+	height      int
+	err         string
+	help        help.Model
+	showHelp    bool
+	composeFrom textinput.Model
+	composeTo   textinput.Model
+	composeSubj textinput.Model
+	composeBody textinput.Model
+	replyBody   textinput.Model
+	searchInput textinput.Model
+	labels      []*gmail.Label
+	currentMsg  *emailItem
+	replyToMsg  *emailItem
+	focused     int
+	searchQuery string
+	selected    map[string]bool // For label selection
+}
+
+
+// Messages
+type (
+	emailLoadedMsg struct{ content string }
+	emailSentMsg   struct{}
+	labelsLoadedMsg struct{ labels []*gmail.Label }
+	searchResultMsg struct{ messages []*gmail.Message }
+)
+
+func initialModel(emails []*gmail.Message, srv *gmail.Service, labels []*gmail.Label) model {
+	items := []list.Item{}
+
+	for _, msg := range emails {
+		item := createEmailItem(srv, msg.Id, false)
+		if item != nil {
+			items = append(items, *item)
+		}
+	}
+
+	l := list.New(items, list.NewDefaultDelegate(), 0, 0)
+	l.Title = "Inbox"
+	l.SetShowHelp(false)
+	l.SetFilteringEnabled(true)
+	l.SetShowStatusBar(true)
+	l.DisableQuitKeybindings()
+	l.KeyMap.Quit = key.NewBinding(key.WithKeys("q"))
+
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+
+	vp := viewport.New(20, 10)
+	vp.Style = lipgloss.NewStyle().Padding(0, 1)
+
+	// Initialize compose fields
+	from := textinput.New()
+	from.Placeholder = "From"
+	from.Focus()
+
+	to := textinput.New()
+	to.Placeholder = "To"
+
+	subj := textinput.New()
+	subj.Placeholder = "Subject"
+
+	body := textinput.New()
+	body.Placeholder = "Compose your message here..."
+
+	reply := textinput.New()
+	reply.Placeholder = "Type your reply here..."
+
+	search := textinput.New()
+	search.Placeholder = "Search emails..."
+
+	help := help.New()
+	help.ShowAll = false
+
+	return model{
+		state:       inbox,
+		list:        l,
+		srv:         srv,
+		loading:     s,
+		viewport:    vp,
+		help:        help,
+		composeFrom: from,
+		composeTo:   to,
+		composeSubj: subj,
+		composeBody: body,
+		replyBody:   reply,
+		searchInput: search,
+		labels:      labels,
+		selected:    make(map[string]bool),
+	}
+}
+
+func (m model) Init() tea.Cmd {
+	return m.loading.Tick
+}
+
+func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.help.Width = msg.Width
+		if m.state == inbox {
+			m.list.SetSize(msg.Width, msg.Height-3)
+		} else if m.state == viewing {
+			m.viewport.Width = msg.Width
+			m.viewport.Height = msg.Height - 7
+		} else if m.state == composing || m.state == replying {
+			// Adjust for compose view
+		}
+		return m, nil
+
+	case tea.KeyMsg:
+		if !m.showHelp {
+			switch {
+			case key.Matches(msg, keys.ShowHelp):
+				m.showHelp = true
+				return m, nil
+			}
+		} else {
+			switch {
+			case key.Matches(msg, keys.CloseHelp):
+				m.showHelp = false
+				return m, nil
+			}
+		}
+
+		switch m.state {
+		case inbox:
+			return updateInbox(msg, m)
+		case viewing:
+			return updateViewing(msg, m)
+		case composing:
+			return updateComposing(msg, m)
+		case replying:
+			return updateReplying(msg, m)
+		case searching:
+			return updateSearching(msg, m)
+		case managingLabels:
+			return updateLabelManagement(msg, m)
+		}
+
+	case emailLoadedMsg:
+		m.state = viewing
+		m.fullEmail = msg.content
+		m.viewport.Width = m.width
+		m.viewport.Height = m.height - 7
+		m.viewport.SetContent(m.fullEmail)
+		return m, nil
+
+	case emailSentMsg:
+		m.state = inbox
+		m.viewport.GotoTop()
+		return m, tea.Batch(showNotification("Email sent successfully!"))
+
+	case labelsLoadedMsg:
+		m.labels = msg.labels
+		m.state = managingLabels
+		return m, nil
+
+	case searchResultMsg:
+		items := []list.Item{}
+		for _, msg := range msg.messages {
+			item := createEmailItem(m.srv, msg.Id, true)
+			if item != nil {
+				items = append(items, *item)
+			}
+		}
+		m.list.SetItems(items)
+		m.state = inbox
+		return m, nil
+	}
+
+	// Update components based on state
+	switch m.state {
+		case loading:
+    		var cmd tea.Cmd
+    		m.loading, cmd = m.loading.Update(msg)
+    		cmds = append(cmds, cmd)
+        case viewing:
+            var cmd tea.Cmd
+            m.viewport, cmd = m.viewport.Update(msg)
+            cmds = append(cmds, cmd)
+        case composing:
+            m = updateComposeFields(msg, &m)
+        case replying:
+            var cmd tea.Cmd
+            m.replyBody, cmd = m.replyBody.Update(msg)
+            cmds = append(cmds, cmd)
+        case searching:
+            var cmd tea.Cmd
+            m.searchInput, cmd = m.searchInput.Update(msg)
+            cmds = append(cmds, cmd)
+		}
+
+
+	return m, tea.Batch(cmds...)
+}
+
+func (m model) View() string {
+	if m.showHelp {
+		return m.help.View(keys)
+	}
+
+	switch m.state {
+	case inbox:
+		return inboxView(m)
+	case viewing:
+		return emailView(m)
+	case loading:
+		return loadingView(m)
+	case composing:
+		return composeView(m)
+	case replying:
+		return replyView(m)
+	case searching:
+		return searchView(m)
+	case managingLabels:
+		return labelsView(m)
+	default:
+		return ""
+	}
+}
+
+
+
+
+// Helper function to create email item
+func createEmailItem(srv *gmail.Service, msgId string, minimal bool) *emailItem {
+    if srv == nil {
+        log.Println("Gmail service is not initialized")
+        return nil
+    }
+
+    var msg *gmail.Message
+    var err error
+    
+    if minimal {
+        msg, err = srv.Users.Messages.Get("me", msgId).Format("minimal").Do()
+    } else {
+        msg, err = srv.Users.Messages.Get("me", msgId).Format("full").Do()
+    }
+    
+    if err != nil {
+        log.Printf("Error fetching message %s: %v\n", msgId, err)
+        return nil
+    }
+
+    if msg == nil {
+        log.Printf("Received nil message for ID %s\n", msgId)
+        return nil
+    }
+
+    item := &emailItem{
+        id:       msg.Id,
+        threadId: msg.ThreadId,
+        snippet:  msg.Snippet,
+    }
+
+    // Extract headers
+    if msg.Payload != nil {
+        for _, h := range msg.Payload.Headers {
+            switch h.Name {
+            case "Subject":
+                item.subject = h.Value
+            case "From":
+                item.from = h.Value
+            case "Date":
+                item.date = formatDate(h.Value)
+            case "To":
+                item.recipient = h.Value
+            }
+        }
+
+        // Extract body if not minimal
+        if !minimal {
+            item.body = extractPlainText(msg.Payload)
+        }
+    }
+
+    // Process labels
+    for _, labelId := range msg.LabelIds {
+        if labelId == "UNREAD" {
+            item.isUnread = true
+        }
+        item.labels = append(item.labels, labelId)
+    }
+
+    // Truncate snippet for display
+    if len(item.snippet) > 80 {
+        item.snippet = item.snippet[:77] + "..."
+    }
+
+    return item
+}
+
+// Views
+func inboxView(m model) string {
+	help := "\n[c] compose • [r] reply • [d] delete • [m] mark read/unread • [l] labels • [/] search • [?] help • [q] quit\n"
+	return m.list.View() + help
+}
+
+func emailView(m model) string {
+	help := "\n[b] back • [r] reply • [d] delete • [m] mark read/unread • [l] labels • [q] quit\n"
+	return help + m.viewport.View()
+}
+
+func loadingView(m model) string {
+	return lipgloss.Place(
+		m.width, m.height,
+		lipgloss.Center, lipgloss.Center,
+		lipgloss.JoinVertical(
+			lipgloss.Center,
+			m.loading.View(),
+			"Loading...",
+		),
+	)
+}
+
+func composeView(m model) string {
+	b := strings.Builder{}
+	b.WriteString("\n  Compose New Email\n\n")
+	b.WriteString("  From: " + m.composeFrom.View() + "\n")
+	b.WriteString("  To:   " + m.composeTo.View() + "\n")
+	b.WriteString("  Subj: " + m.composeSubj.View() + "\n\n")
+	b.WriteString("  Body:\n")
+	b.WriteString(m.composeBody.View() + "\n\n")
+	b.WriteString("\n[ctrl+s] send • [tab] next field • [shift+tab] prev field • [b] back\n")
+	return b.String()
+}
+
+
+func replyView(m model) string {
+	b := strings.Builder{}
+	b.WriteString("\n  Reply to: " + m.replyToMsg.from + "\n")
+	b.WriteString("  Subject: Re: " + m.replyToMsg.subject + "\n\n")
+	b.WriteString(m.replyBody.View() + "\n\n")
+	b.WriteString("\n[ctrl+s] send • [b] back\n")
+	return b.String()
+}
+
+func searchView(m model) string {
+	return "\n  Search: " + m.searchInput.View() + "\n\n[enter] search • [esc] cancel\n"
+}
+
+func labelsView(m model) string {
+	b := strings.Builder{}
+	b.WriteString("\n  Manage Labels\n\n")
+	for i, label := range m.labels {
+		selected := " "
+		if m.selected[label.Id] {
+			selected = "✓"
+		}
+		b.WriteString(fmt.Sprintf("  [%d] %s %s\n", i+1, selected, label.Name))
+	}
+	b.WriteString("\n[enter] apply • [space] toggle • [b] back\n")
+	return b.String()
+}
+
+// Update functions
+func updateInbox(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
+    var cmd tea.Cmd // Declare cmd here
+    switch msg := msg.(type) {
+    case tea.KeyMsg:
+        switch {
+        case key.Matches(msg, keys.Compose):
+            m.state = composing
+            m.composeFrom.SetValue("me") // Default from
+            return m, nil
+
+        case key.Matches(msg, keys.Search):
+            m.state = searching
+            m.searchInput.Focus()
+            return m, nil
+
+        case key.Matches(msg, keys.Labels):
+            return m, loadLabels(m.srv)
+
+        case key.Matches(msg, keys.Quit):
+            return m, tea.Quit
+
+        case msg.String() == "enter":
+            selected, ok := m.list.SelectedItem().(emailItem)
+            if !ok {
+                return m, nil
+            }
+            m.currentMsg = &selected
+            m.state = loading
+            return m, tea.Batch(
+                m.loading.Tick,
+                loadEmail(m.srv, selected.id),
+            )
+
+        case key.Matches(msg, keys.Delete):
+            selected, ok := m.list.SelectedItem().(emailItem)
+            if ok {
+                return m, deleteEmail(m.srv, selected.id)
+            }
+
+        case key.Matches(msg, keys.ToggleRead):
+            selected, ok := m.list.SelectedItem().(emailItem)
+            if ok {
+                return m, toggleReadStatus(m.srv, selected.id, selected.isUnread)
+            }
+        }
+    }
+
+    m.list, cmd = m.list.Update(msg) // Initialize cmd here
+    return m, cmd
+}
+
+type emailLoadErrorMsg struct {
+    err error
+}
+func updateViewing(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
+    var cmd tea.Cmd // Declare cmd here
+    switch msg := msg.(type) {
+    case tea.KeyMsg:
+        switch {
+        case key.Matches(msg, keys.Back):
+            m.state = inbox
+            m.viewport.GotoTop()
+            return m, nil
+
+        case key.Matches(msg, keys.Reply):
+            m.state = replying
+            m.replyToMsg = m.currentMsg
+            m.replyBody.Focus()
+            return m, nil
+
+        case key.Matches(msg, keys.Delete):
+            return m, deleteEmail(m.srv, m.currentMsg.id)
+
+        case key.Matches(msg, keys.ToggleRead):
+            return m, toggleReadStatus(m.srv, m.currentMsg.id, m.currentMsg.isUnread)
+
+        case key.Matches(msg, keys.Labels):
+            return m, loadLabels(m.srv)
+
+        case key.Matches(msg, keys.Quit):
+            return m, tea.Quit
+        }
+    }
+
+    m.viewport, cmd = m.viewport.Update(msg) // Initialize cmd here
+    return m, cmd
+}
+
+func updateComposing(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
+    switch msg := msg.(type) {
+    case tea.KeyMsg:
+        switch {
+        case key.Matches(msg, keys.Back):
+            m.state = inbox
+            return m, nil
+
+        case key.Matches(msg, keys.Send):  // <-- This must match the key binding
+            return m, sendEmail(m.srv, m.composeTo.Value(), m.composeSubj.Value(), m.composeBody.Value())
+        }
+    }
+
+    return updateComposeFields(msg, &m), nil
+}
+
+func updateReplying(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
+    var cmd tea.Cmd // Declare cmd here
+    switch msg := msg.(type) {
+    case tea.KeyMsg:
+        switch {
+        case key.Matches(msg, keys.Back):
+            m.state = viewing
+            return m, nil
+
+        case key.Matches(msg, keys.Send):
+            body := m.replyBody.Value() + "\n\n---\n" + m.currentMsg.body
+            return m, sendEmail(m.srv, m.replyToMsg.from, "Re: "+m.replyToMsg.subject, body)
+        }
+    }
+
+    m.replyBody, cmd = m.replyBody.Update(msg) // Initialize cmd here
+    return m, cmd
+}
+
+func updateSearching(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
+    var cmd tea.Cmd // Declare cmd here
+    switch msg := msg.(type) {
+    case tea.KeyMsg:
+        switch {
+        case key.Matches(msg, keys.Back):
+            m.state = inbox
+            return m, nil
+
+        case msg.Type == tea.KeyEnter:
+            m.state = loading
+            m.searchQuery = m.searchInput.Value()
+            return m, tea.Batch(
+                m.loading.Tick,
+                performSearch(m.srv, m.searchQuery),
+            )
+        }
+    }
+
+    m.searchInput, cmd = m.searchInput.Update(msg) // Initialize cmd here
+    return m, cmd
+}
+
+func updateLabelManagement(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch {
+		case key.Matches(msg, keys.Back):
+			m.state = inbox
+			return m, nil
+
+		case msg.Type == tea.KeySpace:
+			if m.currentMsg != nil {
+				for _, label := range m.labels {
+					if m.selected[label.Id] {
+						// Toggle logic
+					}
+				}
+			}
+			return m, nil
+
+		case msg.Type == tea.KeyEnter:
+			// Apply label changes
+			m.state = inbox
+			return m, nil
+		}
+	}
+	return m, nil
+}
+
+func updateComposeFields(msg tea.Msg, m *model) model {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch {
+		case key.Matches(msg, keys.NextInput):
+			m.focused = (m.focused + 1) % 4
+		case key.Matches(msg, keys.PrevInput):
+			m.focused = (m.focused + 3) % 4
+		}
+
+		switch m.focused {
+		case 0:
+			m.composeFrom.Focus()
+		case 1:
+			m.composeTo.Focus()
+		case 2:
+			m.composeSubj.Focus()
+		case 3:
+			m.composeBody.Focus()
+		}
+	}
+
+	m.composeFrom, _ = m.composeFrom.Update(msg)
+	m.composeTo, _ = m.composeTo.Update(msg)
+	m.composeSubj, _ = m.composeSubj.Update(msg)
+	m.composeBody, _ = m.composeBody.Update(msg)
+	return *m
+}
+
+
+
+// Email loading
+func loadEmail(srv *gmail.Service, msgID string) tea.Cmd {
+	return func() tea.Msg {
+		content, err := fetchFullEmailBody(srv, msgID)
+		if err != nil {
+			return emailLoadErrorMsg{err: err}
+		}
+		return emailLoadedMsg{content: content}
+	}
+}
+
+func fetchFullEmailBody(srv *gmail.Service, msgID string) (string, error) {
+	msg, err := srv.Users.Messages.Get("me", msgID).Format("full").Do()
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch message: %w", err)
+	}
+
+	var from, subject, date string
+	for _, h := range msg.Payload.Headers {
+		switch h.Name {
+		case "From":
+			from = h.Value
+		case "Subject":
+			subject = h.Value
+		case "Date":
+			date = formatDate(h.Value)
+		}
+	}
+
+	body := extractPlainText(msg.Payload)
+	if body == "" {
+		body = "(no text content found)"
+	}
+
+	return fmt.Sprintf("From: %s\nSubject: %s\nDate: %s\n\n%s", 
+		from, subject, date, body), nil
+}
+
+// Email sending
+func sendEmail(srv *gmail.Service, to, subject, body string) tea.Cmd {
+    return func() tea.Msg {
+        msg := fmt.Sprintf("To: %s\r\nSubject: %s\r\n\r\n%s", to, subject, body)
+        raw := base64.URLEncoding.EncodeToString([]byte(msg))
+        
+        _, err := srv.Users.Messages.Send("me", &gmail.Message{
+            Raw: raw,
+        }).Do()
+        
+        if err != nil {
+            log.Printf("Failed to send email: %v", err)  // Log errors
+            return emailLoadErrorMsg{err: err}
+        }
+        log.Println("Email sent successfully!")  // Debug log
+        return emailSentMsg{}
+    }
+}
+
+// Email management
+func deleteEmail(srv *gmail.Service, msgId string) tea.Cmd {
+    return func() tea.Msg {
+        _, err := srv.Users.Messages.Trash("me", msgId).Do()
+        if err != nil {
+            return emailLoadErrorMsg{err: err}
+        }
+        return notificationMsg{message: "Email moved to trash"}
+    }
+}
+
+func toggleReadStatus(srv *gmail.Service, msgId string, isUnread bool) tea.Cmd {
+	return func() tea.Msg {
+		mod := gmail.ModifyMessageRequest{}
+		if isUnread {
+			mod.RemoveLabelIds = []string{"UNREAD"}
+		} else {
+			mod.AddLabelIds = []string{"UNREAD"}
+		}
+
+		_, err := srv.Users.Messages.Modify("me", msgId, &mod).Do()
+		if err != nil {
+			return emailLoadErrorMsg{err: err}
+		}
+		action := "marked as read"
+		if isUnread {
+			action = "marked as unread"
+		}
+		return notificationMsg{message: "Email " + action}
+	}
+}
+
+// Search
+func performSearch(srv *gmail.Service, query string) tea.Cmd {
+	return func() tea.Msg {
+		msgs, err := srv.Users.Messages.List("me").Q(query).MaxResults(30).Do()
+		if err != nil {
+			return emailLoadErrorMsg{err: err}
+		}
+		return searchResultMsg{messages: msgs.Messages}
+	}
+}
+
+// Labels
+func loadLabels(srv *gmail.Service) tea.Cmd {
+	return func() tea.Msg {
+		labels, err := srv.Users.Labels.List("me").Do()
+		if err != nil {
+			return emailLoadErrorMsg{err: err}
+		}
+		return labelsLoadedMsg{labels: labels.Labels}
+	}
+}
+
+// Helper functions
+func formatDate(dateStr string) string {
+	formats := []string{
+		time.RFC1123Z,
+		time.RFC1123,
+		"Mon, 2 Jan 2006 15:04:05 -0700",
+		"2 Jan 2006 15:04:05 -0700",
+	}
+	
+	for _, format := range formats {
+		t, err := time.Parse(format, dateStr)
+		if err == nil {
+			return t.Format("Jan 02, 2006 15:04")
+		}
+	}
+	return dateStr
+}
+
+func extractPlainText(payload *gmail.MessagePart) string {
+    if payload.MimeType == "text/plain" && payload.Body != nil && payload.Body.Data != "" {
+        return decodeBody(payload.Body.Data)
+    }
+
+    if strings.HasPrefix(payload.MimeType, "multipart/") && len(payload.Parts) > 0 {
+        for _, p := range payload.Parts {
+            if p.MimeType == "text/plain" {
+                if text := extractPlainText(p); text != "" {
+                    return text
+                }
+            }
+        }
+
+        for _, p := range payload.Parts {
+            if p.MimeType == "text/html" {
+                if text := extractPlainText(p); text != "" {
+                    return text
+                }
+            }
+        }
+    }
+
+    if payload.MimeType == "text/html" && payload.Body != nil && payload.Body.Data != "" {
+        htmlContent := decodeBody(payload.Body.Data)
+        return stripHTML(htmlContent)
+    }
+
+    return ""
+}
+
+func decodeBody(body string) string {
+    if len(body)%4 != 0 {
+        body += strings.Repeat("=", (4-len(body)%4)%4)
+    }
+
+    decoded, err := base64.URLEncoding.DecodeString(body)
+    if err != nil {
+        decoded, err = base64.StdEncoding.DecodeString(body)
+        if err != nil {
+            return "Failed to decode body."
+        }
+    }
+    return string(decoded)
+}
+
+func stripHTML(input string) string {
+    re := regexp.MustCompile(`<[^>]*>`)
+    input = re.ReplaceAllString(input, "")
+
+    entities := map[string]string{
+        "&nbsp;": " ", "&lt;": "<", "&gt;": ">", 
+        "&amp;": "&", "&quot;": "\"", "&apos;": "'",
+    }
+
+    for k, v := range entities {
+        input = strings.ReplaceAll(input, k, v)
+    }
+
+    input = regexp.MustCompile(`\s+`).ReplaceAllString(input, " ")
+    return strings.TrimSpace(input)
+}
+
+
+// Notification message
+type notificationMsg struct {
+	message string
+}
+
+func showNotification(msg string) tea.Cmd {
+	return func() tea.Msg {
+		return notificationMsg{message: msg}
+	}
+}

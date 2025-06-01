@@ -1,0 +1,13 @@
+# Ignore credentials and tokens
+credentials.json
+*.token.json
+*.env
+
+# Ignore Go build files
+bin/
+*.exe
+
+# Ignore IDE files
+.idea/
+.vscode/
+*.swp
