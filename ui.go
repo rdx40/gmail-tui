@@ -99,13 +99,14 @@ var keys = keyMap{
 		key.WithHelp("ctrl+s", "send"),
 	),
 	NextInput: key.NewBinding(
-		key.WithKeys("tab"),
-		key.WithHelp("tab", "next field"),
+    key.WithKeys("tab"),
+    key.WithHelp("tab", "next field"),
 	),
 	PrevInput: key.NewBinding(
-		key.WithKeys("shift+tab"),
-		key.WithHelp("shift+tab", "prev field"),
+    key.WithKeys("shift+tab"),
+    key.WithHelp("shift+tab", "prev field"),
 	),
+
 	ShowHelp: key.NewBinding(
 		key.WithKeys("?"),
 		key.WithHelp("?", "help"),
@@ -564,7 +565,7 @@ func updateInbox(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
 }
 
 type emailLoadErrorMsg struct {
-    err error
+    err error	
 }
 func updateViewing(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
     var cmd tea.Cmd // Declare cmd here
@@ -601,19 +602,27 @@ func updateViewing(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
 }
 
 func updateComposing(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
+    var cmd tea.Cmd
+    
     switch msg := msg.(type) {
     case tea.KeyMsg:
         switch {
         case key.Matches(msg, keys.Back):
             m.state = inbox
             return m, nil
-
-        case key.Matches(msg, keys.Send):  // <-- This must match the key binding
+            
+        case key.Matches(msg, keys.Send):
             return m, sendEmail(m.srv, m.composeTo.Value(), m.composeSubj.Value(), m.composeBody.Value())
+            
+        case key.Matches(msg, keys.NextInput), key.Matches(msg, keys.PrevInput):
+            // Let updateComposeFields handle these
+            return updateComposeFields(msg, &m), nil
         }
     }
-
-    return updateComposeFields(msg, &m), nil
+    
+    // Update the fields
+    newModel := updateComposeFields(msg, &m)
+    return newModel, cmd
 }
 
 func updateReplying(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
@@ -686,35 +695,67 @@ func updateLabelManagement(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
 }
 
 func updateComposeFields(msg tea.Msg, m *model) model {
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch {
-		case key.Matches(msg, keys.NextInput):
-			m.focused = (m.focused + 1) % 4
-		case key.Matches(msg, keys.PrevInput):
-			m.focused = (m.focused + 3) % 4
-		}
-
-		switch m.focused {
-		case 0:
-			m.composeFrom.Focus()
-		case 1:
-			m.composeTo.Focus()
-		case 2:
-			m.composeSubj.Focus()
-		case 3:
-			m.composeBody.Focus()
-		}
-	}
-
-	m.composeFrom, _ = m.composeFrom.Update(msg)
-	m.composeTo, _ = m.composeTo.Update(msg)
-	m.composeSubj, _ = m.composeSubj.Update(msg)
-	m.composeBody, _ = m.composeBody.Update(msg)
-	return *m
+    switch msg := msg.(type) {
+    case tea.KeyMsg:
+        switch {
+        case key.Matches(msg, keys.NextInput): // Tab key
+            m.focused = (m.focused + 1) % 4
+            // Blur all fields first
+            m.composeFrom.Blur()
+            m.composeTo.Blur()
+            m.composeSubj.Blur()
+            m.composeBody.Blur()
+            
+            // Focus the next field
+            switch m.focused {
+            case 0:
+                m.composeFrom.Focus()
+            case 1:
+                m.composeTo.Focus()
+            case 2:
+                m.composeSubj.Focus()
+            case 3:
+                m.composeBody.Focus()
+            }
+            return *m
+            
+        case key.Matches(msg, keys.PrevInput): // Shift+Tab key
+            m.focused = (m.focused - 1 + 4) % 4
+            // Blur all fields first
+            m.composeFrom.Blur()
+            m.composeTo.Blur()
+            m.composeSubj.Blur()
+            m.composeBody.Blur()
+            
+            // Focus the previous field
+            switch m.focused {
+            case 0:
+                m.composeFrom.Focus()
+            case 1:
+                m.composeTo.Focus()
+            case 2:
+                m.composeSubj.Focus()
+            case 3:
+                m.composeBody.Focus()
+            }
+            return *m
+        }
+    }
+    
+    // Update only the focused field
+    switch m.focused {
+    case 0:
+        m.composeFrom, _ = m.composeFrom.Update(msg)
+    case 1:
+        m.composeTo, _ = m.composeTo.Update(msg)
+    case 2:
+        m.composeSubj, _ = m.composeSubj.Update(msg)
+    case 3:
+        m.composeBody, _ = m.composeBody.Update(msg)
+    }
+    
+    return *m
 }
-
-
 
 // Email loading
 func loadEmail(srv *gmail.Service, msgID string) tea.Cmd {
