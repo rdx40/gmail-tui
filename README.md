@@ -1,2 +1,3 @@
 # gmail-tui
-gmail but in your terminal in go
+
+gmail but in your terminal using go

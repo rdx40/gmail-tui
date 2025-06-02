@@ -190,13 +190,25 @@ func initialModel(emails []*gmail.Message, srv *gmail.Service, labels []*gmail.L
 		}
 	}
 
-	l := list.New(items, list.NewDefaultDelegate(), 0, 0)
-	l.Title = "Inbox"
-	l.SetShowHelp(false)
-	l.SetFilteringEnabled(true)
-	l.SetShowStatusBar(true)
-	l.DisableQuitKeybindings()
-	l.KeyMap.Quit = key.NewBinding(key.WithKeys("q"))
+	// Create a new default delegate with custom styling
+    delegate := list.NewDefaultDelegate()
+    delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.
+        BorderForeground(lipgloss.Color("62")).
+        Foreground(lipgloss.Color("62"))
+    delegate.Styles.SelectedDesc = delegate.Styles.SelectedTitle.Copy().
+        Foreground(lipgloss.Color("245"))
+
+	l := list.New(items, delegate, 0, 0)
+    l.Title = "Inbox"
+    l.Styles.Title = lipgloss.NewStyle().MarginLeft(2)
+    l.SetShowStatusBar(true)
+    l.SetFilteringEnabled(true)
+    l.SetShowHelp(false)
+    l.DisableQuitKeybindings()
+    l.KeyMap.Quit = key.NewBinding(key.WithKeys("q"))
+    
+    // Set the size later when we get the window dimensions
+    l.SetSize(0, 0) // Will be updated in WindowSizeMsg
 
 	// Initialize labels list
 	labelsList := list.New([]list.Item{}, list.NewDefaultDelegate(), 0, 0)
