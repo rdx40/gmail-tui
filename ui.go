@@ -31,6 +31,7 @@ const (
 	managingLabels
 )
 
+
 type keyMap struct {
 	Back        key.Binding
 	Reply       key.Binding
@@ -45,7 +46,9 @@ type keyMap struct {
 	PrevInput   key.Binding
 	ShowHelp    key.Binding
 	CloseHelp   key.Binding
+	Select      key.Binding
 }
+
 func (k keyMap) ShortHelp() []key.Binding {
 	return []key.Binding{
 		k.ShowHelp, k.Compose, k.Search, k.Labels, k.Quit,
@@ -57,7 +60,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Compose, k.Reply, k.Search, k.Labels},
 		{k.Delete, k.ToggleRead, k.Back, k.Quit},
 		{k.Send, k.NextInput, k.PrevInput},
-		{k.ShowHelp, k.CloseHelp},
+		{k.ShowHelp, k.CloseHelp, k.Select},
 	}
 }
 
@@ -99,14 +102,13 @@ var keys = keyMap{
 		key.WithHelp("ctrl+s", "send"),
 	),
 	NextInput: key.NewBinding(
-    key.WithKeys("tab"),
-    key.WithHelp("tab", "next field"),
+		key.WithKeys("tab"),
+		key.WithHelp("tab", "next field"),
 	),
 	PrevInput: key.NewBinding(
-    key.WithKeys("shift+tab"),
-    key.WithHelp("shift+tab", "prev field"),
+		key.WithKeys("shift+tab"),
+		key.WithHelp("shift+tab", "prev field"),
 	),
-
 	ShowHelp: key.NewBinding(
 		key.WithKeys("?"),
 		key.WithHelp("?", "help"),
@@ -114,6 +116,10 @@ var keys = keyMap{
 	CloseHelp: key.NewBinding(
 		key.WithKeys("?"),
 		key.WithHelp("?", "close help"),
+	),
+	Select: key.NewBinding(
+		key.WithKeys("enter"),
+		key.WithHelp("enter", "select"),
 	),
 }
 
@@ -141,7 +147,14 @@ func (e emailItem) Description() string {
 }
 func (e emailItem) FilterValue() string { return e.subject + " " + e.from }
 
-//expanded model
+type labelItem struct {
+	label *gmail.Label
+}
+
+func (l labelItem) Title() string       { return l.label.Name }
+func (l labelItem) Description() string { return fmt.Sprintf("ID: %s", l.label.Id) }
+func (l labelItem) FilterValue() string { return l.label.Name }
+
 type model struct {
 	state       state
 	list        list.Model
@@ -161,25 +174,15 @@ type model struct {
 	replyBody   textinput.Model
 	searchInput textinput.Model
 	labels      []*gmail.Label
+	labelsList  list.Model
 	currentMsg  *emailItem
 	replyToMsg  *emailItem
 	focused     int
 	searchQuery string
-	selected    map[string]bool // For label selection
 }
-
-
-// Messages
-type (
-	emailLoadedMsg struct{ content string }
-	emailSentMsg   struct{}
-	labelsLoadedMsg struct{ labels []*gmail.Label }
-	searchResultMsg struct{ messages []*gmail.Message }
-)
 
 func initialModel(emails []*gmail.Message, srv *gmail.Service, labels []*gmail.Label) model {
 	items := []list.Item{}
-
 	for _, msg := range emails {
 		item := createEmailItem(srv, msg.Id, false)
 		if item != nil {
@@ -195,6 +198,17 @@ func initialModel(emails []*gmail.Message, srv *gmail.Service, labels []*gmail.L
 	l.DisableQuitKeybindings()
 	l.KeyMap.Quit = key.NewBinding(key.WithKeys("q"))
 
+	// Initialize labels list
+	labelsList := list.New([]list.Item{}, list.NewDefaultDelegate(), 0, 0)
+	labelsList.Title = "Labels"
+	labelsList.SetShowHelp(false)
+	labelsList.DisableQuitKeybindings()
+	labelsList.KeyMap.Quit = key.NewBinding(key.WithKeys("q"))
+	labelsList.KeyMap.CursorUp = key.NewBinding(key.WithKeys("up", "k"))
+	labelsList.KeyMap.CursorDown = key.NewBinding(key.WithKeys("down", "j"))
+	labelsList.KeyMap.GoToStart = key.NewBinding(key.WithKeys("home", "g"))
+	labelsList.KeyMap.GoToEnd = key.NewBinding(key.WithKeys("end", "G"))
+
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
@@ -202,7 +216,6 @@ func initialModel(emails []*gmail.Message, srv *gmail.Service, labels []*gmail.L
 	vp := viewport.New(20, 10)
 	vp.Style = lipgloss.NewStyle().Padding(0, 1)
 
-	// Initialize compose fields
 	from := textinput.New()
 	from.Placeholder = "From"
 	from.Focus()
@@ -239,7 +252,7 @@ func initialModel(emails []*gmail.Message, srv *gmail.Service, labels []*gmail.L
 		replyBody:   reply,
 		searchInput: search,
 		labels:      labels,
-		selected:    make(map[string]bool),
+		labelsList:  labelsList,
 	}
 }
 
@@ -247,23 +260,37 @@ func (m model) Init() tea.Cmd {
 	return m.loading.Tick
 }
 
+func loadEmailsByLabel(srv *gmail.Service, labelID string) tea.Cmd {
+	return func() tea.Msg {
+		msgs, err := srv.Users.Messages.List("me").LabelIds(labelID).MaxResults(10).Do()
+		if err != nil {
+			return emailLoadErrorMsg{err: err}
+		}
+		return searchResultMsg{messages: msgs.Messages}
+	}
+}
+
+
+
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
-
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
 		m.help.Width = msg.Width
-		if m.state == inbox {
-			m.list.SetSize(msg.Width, msg.Height-3)
-		} else if m.state == viewing {
-			m.viewport.Width = msg.Width
-			m.viewport.Height = msg.Height - 7
-		} else if m.state == composing || m.state == replying {
-			// Adjust for compose view
-		}
-		return m, nil
+
+		// Dynamically resize the list based on the terminal dimensions
+        if m.state == inbox {
+            m.list.SetSize(msg.Width, msg.Height-3) // Adjust height for status bar
+        } else if m.state == managingLabels {
+            m.labelsList.SetSize(msg.Width, msg.Height-3) // Adjust height for help text
+        } else if m.state == viewing {
+            m.viewport.Width = msg.Width
+            m.viewport.Height = msg.Height - 7 // Adjust height for header/footer
+        }
+        return m, nil
 
 	case tea.KeyMsg:
 		if !m.showHelp {
@@ -309,7 +336,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(showNotification("Email sent successfully!"))
 
 	case labelsLoadedMsg:
+		items := make([]list.Item, len(msg.labels))
+		for i, label := range msg.labels {
+			items[i] = labelItem{label: label}
+		}
 		m.labels = msg.labels
+		m.labelsList.SetItems(items)
 		m.state = managingLabels
 		return m, nil
 
@@ -326,28 +358,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Update components based on state
 	switch m.state {
-		case loading:
-    		var cmd tea.Cmd
-    		m.loading, cmd = m.loading.Update(msg)
-    		cmds = append(cmds, cmd)
-        case viewing:
-            var cmd tea.Cmd
-            m.viewport, cmd = m.viewport.Update(msg)
-            cmds = append(cmds, cmd)
-        case composing:
-            m = updateComposeFields(msg, &m)
-        case replying:
-            var cmd tea.Cmd
-            m.replyBody, cmd = m.replyBody.Update(msg)
-            cmds = append(cmds, cmd)
-        case searching:
-            var cmd tea.Cmd
-            m.searchInput, cmd = m.searchInput.Update(msg)
-            cmds = append(cmds, cmd)
-		}
-
+	case loading:
+		var cmd tea.Cmd
+		m.loading, cmd = m.loading.Update(msg)
+		cmds = append(cmds, cmd)
+	case viewing:
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(msg)
+		cmds = append(cmds, cmd)
+	case composing:
+		m = updateComposeFields(msg, &m)
+	case replying:
+		var cmd tea.Cmd
+		m.replyBody, cmd = m.replyBody.Update(msg)
+		cmds = append(cmds, cmd)
+	case searching:
+		var cmd tea.Cmd
+		m.searchInput, cmd = m.searchInput.Update(msg)
+		cmds = append(cmds, cmd)
+	case managingLabels:
+		var cmd tea.Cmd
+		m.labelsList, cmd = m.labelsList.Update(msg)
+		cmds = append(cmds, cmd)
+	}
 
 	return m, tea.Batch(cmds...)
 }
@@ -499,19 +533,9 @@ func searchView(m model) string {
 }
 
 func labelsView(m model) string {
-	b := strings.Builder{}
-	b.WriteString("\n  Manage Labels\n\n")
-	for i, label := range m.labels {
-		selected := " "
-		if m.selected[label.Id] {
-			selected = "✓"
-		}
-		b.WriteString(fmt.Sprintf("  [%d] %s %s\n", i+1, selected, label.Name))
-	}
-	b.WriteString("\n[enter] apply • [space] toggle • [b] back\n")
-	return b.String()
+	help := "\n[↑/↓] navigate • [enter] select • [b] back\n"
+	return m.labelsList.View() + help
 }
-
 // Update functions
 func updateInbox(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
     var cmd tea.Cmd // Declare cmd here
@@ -675,23 +699,21 @@ func updateLabelManagement(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
 			m.state = inbox
 			return m, nil
 
-		case msg.Type == tea.KeySpace:
-			if m.currentMsg != nil {
-				for _, label := range m.labels {
-					if m.selected[label.Id] {
-						// Toggle logic
-					}
-				}
+		case key.Matches(msg, keys.Select):
+			if selected, ok := m.labelsList.SelectedItem().(labelItem); ok {
+				m.state = loading
+				return m, tea.Batch(
+					m.loading.Tick,
+					loadEmailsByLabel(m.srv, selected.label.Id),
+				)
 			}
-			return m, nil
-
-		case msg.Type == tea.KeyEnter:
-			// Apply label changes
-			m.state = inbox
 			return m, nil
 		}
 	}
-	return m, nil
+
+	var cmd tea.Cmd
+	m.labelsList, cmd = m.labelsList.Update(msg)
+	return m, cmd
 }
 
 func updateComposeFields(msg tea.Msg, m *model) model {
@@ -960,3 +982,13 @@ func showNotification(msg string) tea.Cmd {
 		return notificationMsg{message: msg}
 	}
 }
+
+
+
+// Messages
+type (
+    emailLoadedMsg struct{ content string }
+    emailSentMsg   struct{}
+    labelsLoadedMsg struct{ labels []*gmail.Label }
+    searchResultMsg struct{ messages []*gmail.Message }
+)
