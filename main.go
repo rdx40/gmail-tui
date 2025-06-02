@@ -3,13 +3,10 @@ package main
 import (
 	"fmt"
 	"log"
-	"os"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"google.golang.org/api/gmail/v1"
 )
-
-// ...existing code...
 
 func main() {
     // Initialize Gmail service
@@ -24,10 +21,11 @@ func main() {
         log.Fatalf("Unable to retrieve messages: %v", err)
     }
 
-    // Check if there are any messages
-    if msgs == nil || len(msgs.Messages) == 0 {
-        fmt.Println("No messages found in primary inbox")
-        os.Exit(0)
+    var emailItems []*gmail.Message
+    if msgs != nil && len(msgs.Messages) > 0 {
+        emailItems = msgs.Messages
+    } else {
+        fmt.Println("No messages found in primary inbox.")
     }
 
     // Get labels
@@ -38,10 +36,8 @@ func main() {
     }
 
     // Initialize the TUI program
-    p := tea.NewProgram(initialModel(msgs.Messages, srv, labels.Labels))
+    p := tea.NewProgram(initialModel(emailItems, srv, labels.Labels))
     if _, err := p.Run(); err != nil {
         log.Fatalf("Error running TUI: %v", err)
     }
 }
-
-// ...existing code...

@@ -281,16 +281,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		m.help.Width = msg.Width
 
-		// Dynamically resize the list based on the terminal dimensions
-        if m.state == inbox {
-            m.list.SetSize(msg.Width, msg.Height-3) // Adjust height for status bar
-        } else if m.state == managingLabels {
-            m.labelsList.SetSize(msg.Width, msg.Height-3) // Adjust height for help text
-        } else if m.state == viewing {
-            m.viewport.Width = msg.Width
-            m.viewport.Height = msg.Height - 7 // Adjust height for header/footer
-        }
-        return m, nil
+		if m.state == inbox {
+			m.list.SetSize(msg.Width, msg.Height-3) // Adjust height for status bar
+		}else if m.state == viewing {
+			m.viewport.Width = msg.Width
+        	m.viewport.Height = msg.Height - 7 // Adjust height for header/footer
+		}
+		return m, nil
 
 	case tea.KeyMsg:
 		if !m.showHelp {
@@ -490,8 +487,14 @@ func inboxView(m model) string {
 }
 
 func emailView(m model) string {
-	help := "\n[b] back • [r] reply • [d] delete • [m] mark read/unread • [l] labels • [q] quit\n"
-	return help + m.viewport.View()
+    b := strings.Builder{}
+    b.WriteString(fmt.Sprintf("\nFrom: %s\n", m.currentMsg.from))
+    b.WriteString(fmt.Sprintf("To: %s\n", m.currentMsg.recipient))
+    b.WriteString(fmt.Sprintf("Subject: %s\n", m.currentMsg.subject))
+    b.WriteString(fmt.Sprintf("Date: %s\n\n", m.currentMsg.date))
+    b.WriteString(m.viewport.View()) // Display the email body
+    b.WriteString("\n\n[b] back • [r] reply • [d] delete • [m] mark read/unread • [l] labels • [q] quit\n")
+    return b.String()
 }
 
 func loadingView(m model) string {
@@ -650,7 +653,7 @@ func updateComposing(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
 }
 
 func updateReplying(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
-    var cmd tea.Cmd // Declare cmd here
+    var cmd tea.Cmd
     switch msg := msg.(type) {
     case tea.KeyMsg:
         switch {
@@ -659,13 +662,24 @@ func updateReplying(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
             return m, nil
 
         case key.Matches(msg, keys.Send):
-            body := m.replyBody.Value() + "\n\n---\n" + m.currentMsg.body
-            return m, sendEmail(m.srv, m.replyToMsg.from, "Re: "+m.replyToMsg.subject, body)
+            // Format reply with original message
+            originalMessage := fmt.Sprintf("\n\n--- Original Message ---\n%s", indentText(m.currentMsg.body))
+            replyBody := m.replyBody.Value() + originalMessage
+            return m, sendEmail(m.srv, m.replyToMsg.from, "Re: "+m.replyToMsg.subject, replyBody)
         }
     }
 
-    m.replyBody, cmd = m.replyBody.Update(msg) // Initialize cmd here
+    m.replyBody, cmd = m.replyBody.Update(msg)
     return m, cmd
+}
+
+// Helper function to indent the original message
+func indentText(text string) string {
+    lines := strings.Split(text, "\n")
+    for i, line := range lines {
+        lines[i] = "> " + line // Add '>' to each line for indentation
+    }
+    return strings.Join(lines, "\n")
 }
 
 func updateSearching(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
