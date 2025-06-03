@@ -1,3 +1,9 @@
-# gmail-tui
+Currently only the basic functionality work
+like compose a mail
+read a mail
+reply to a mail
 
-gmail but in your terminal using go
+
+
+still gotta figure how to fix the scroll bar (click 'l')
+and a LOTTTT MORE
