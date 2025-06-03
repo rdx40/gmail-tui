@@ -16,5 +16,6 @@ and wait till it starts
 
 ## how it looks:
 
-![The Inbox](Screenshot 2025-06-03 170822.png)
-![Composing a mail](Screenshot 2025-06-03 170919.png)
+![The Inbox]("Screenshot 2025-06-03 170822.png")
+
+![The Inbox]("images/Screenshot 2025-06-03 170822.png")
