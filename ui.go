@@ -12,7 +12,8 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/textarea"
+  	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -30,7 +31,6 @@ const (
 	searching
 	managingLabels
 )
-
 
 type keyMap struct {
 	Back        key.Binding
@@ -170,8 +170,8 @@ type model struct {
 	composeFrom textinput.Model
 	composeTo   textinput.Model
 	composeSubj textinput.Model
-	composeBody textinput.Model
-	replyBody   textinput.Model
+	composeBody textarea.Model
+	replyBody   textarea.Model
 	searchInput textinput.Model
 	labels      []*gmail.Label
 	labelsList  list.Model
@@ -184,13 +184,25 @@ type model struct {
 func initialModel(emails []*gmail.Message, srv *gmail.Service, labels []*gmail.Label) model {
 	items := []list.Item{}
 	for _, msg := range emails {
-		item := createEmailItem(srv, msg.Id, false)
-		if item != nil {
-			items = append(items, *item)
-		}
-	}
+        item := createEmailItem(srv, msg.Id, false)
+        if item != nil {
+            items = append(items, *item)
+        }
+    }
+	
+	composeBody := textarea.New()
+	composeBody.Placeholder = "Compose your message here..."
+	composeBody.Focus()
+	composeBody.CharLimit = 0
+	composeBody.SetWidth(80)
+	composeBody.SetHeight(10)
 
-	// Create a new default delegate with custom styling
+	replyBody := textarea.New()
+	replyBody.Placeholder = "Type your reply here..."
+	replyBody.CharLimit = 0
+	replyBody.SetWidth(80)
+    replyBody.SetHeight(10)
+
     delegate := list.NewDefaultDelegate()
     delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.
         BorderForeground(lipgloss.Color("62")).
@@ -207,10 +219,8 @@ func initialModel(emails []*gmail.Message, srv *gmail.Service, labels []*gmail.L
     l.DisableQuitKeybindings()
     l.KeyMap.Quit = key.NewBinding(key.WithKeys("q"))
     
-    // Set the size later when we get the window dimensions
-    l.SetSize(0, 0) // Will be updated in WindowSizeMsg
+    l.SetSize(0, 0)
 
-	// Initialize labels list
 	labelsList := list.New([]list.Item{}, list.NewDefaultDelegate(), 0, 0)
 	labelsList.Title = "Labels"
 	labelsList.SetShowHelp(false)
@@ -238,12 +248,6 @@ func initialModel(emails []*gmail.Message, srv *gmail.Service, labels []*gmail.L
 	subj := textinput.New()
 	subj.Placeholder = "Subject"
 
-	body := textinput.New()
-	body.Placeholder = "Compose your message here..."
-
-	reply := textinput.New()
-	reply.Placeholder = "Type your reply here..."
-
 	search := textinput.New()
 	search.Placeholder = "Search emails..."
 
@@ -251,21 +255,21 @@ func initialModel(emails []*gmail.Message, srv *gmail.Service, labels []*gmail.L
 	help.ShowAll = false
 
 	return model{
-		state:       inbox,
-		list:        l,
-		srv:         srv,
-		loading:     s,
-		viewport:    vp,
-		help:        help,
-		composeFrom: from,
-		composeTo:   to,
-		composeSubj: subj,
-		composeBody: body,
-		replyBody:   reply,
-		searchInput: search,
-		labels:      labels,
-		labelsList:  labelsList,
-	}
+        state:       inbox,
+        list:        l,
+        srv:         srv,
+        loading:     s,
+        viewport:    vp,
+        help:        help,
+        composeFrom: from,
+        composeTo:   to,
+        composeSubj: subj,
+        composeBody: composeBody,
+        replyBody:   replyBody,
+        searchInput: search,
+        labels:      labels,
+        labelsList:  labelsList,
+    }
 }
 
 func (m model) Init() tea.Cmd {
@@ -282,25 +286,24 @@ func loadEmailsByLabel(srv *gmail.Service, labelID string) tea.Cmd {
 	}
 }
 
-
-
-
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmds []tea.Cmd
-	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		m.help.Width = msg.Width
+    var cmds []tea.Cmd
 
-		if m.state == inbox {
-			m.list.SetSize(msg.Width, msg.Height-3) // Adjust height for status bar
-		}else if m.state == viewing {
-			m.viewport.Width = msg.Width
-        	m.viewport.Height = msg.Height - 7 // Adjust height for header/footer
-		}
-		return m, nil
+    switch msg := msg.(type) {
+    case tea.WindowSizeMsg:
+        m.width = msg.Width
+        m.height = msg.Height
+        m.help.Width = msg.Width
 
+        if m.state == inbox {
+            m.list.SetSize(msg.Width, msg.Height-3)
+        } else if m.state == viewing {
+            m.viewport.Width = msg.Width
+            m.viewport.Height = msg.Height - 7
+        }
+        return m, nil
+    // Remove the unused `cmd` declaration
+    // ...existing code...
 	case tea.KeyMsg:
 		if !m.showHelp {
 			switch {
@@ -376,8 +379,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
 		cmds = append(cmds, cmd)
-	case composing:
-		m = updateComposeFields(msg, &m)
 	case replying:
 		var cmd tea.Cmd
 		m.replyBody, cmd = m.replyBody.Update(msg)
@@ -420,10 +421,6 @@ func (m model) View() string {
 	}
 }
 
-
-
-
-// Helper function to create email item
 func createEmailItem(srv *gmail.Service, msgId string, minimal bool) *emailItem {
     if srv == nil {
         log.Println("Gmail service is not initialized")
@@ -455,7 +452,6 @@ func createEmailItem(srv *gmail.Service, msgId string, minimal bool) *emailItem 
         snippet:  msg.Snippet,
     }
 
-    // Extract headers
     if msg.Payload != nil {
         for _, h := range msg.Payload.Headers {
             switch h.Name {
@@ -470,13 +466,11 @@ func createEmailItem(srv *gmail.Service, msgId string, minimal bool) *emailItem 
             }
         }
 
-        // Extract body if not minimal
         if !minimal {
             item.body = extractPlainText(msg.Payload)
         }
     }
 
-    // Process labels
     for _, labelId := range msg.LabelIds {
         if labelId == "UNREAD" {
             item.isUnread = true
@@ -484,7 +478,6 @@ func createEmailItem(srv *gmail.Service, msgId string, minimal bool) *emailItem 
         item.labels = append(item.labels, labelId)
     }
 
-    // Truncate snippet for display
     if len(item.snippet) > 80 {
         item.snippet = item.snippet[:77] + "..."
     }
@@ -492,7 +485,6 @@ func createEmailItem(srv *gmail.Service, msgId string, minimal bool) *emailItem 
     return item
 }
 
-// Views
 func inboxView(m model) string {
 	help := "\n[c] compose • [r] reply • [d] delete • [m] mark read/unread • [l] labels • [/] search • [?] help • [q] quit\n"
 	return m.list.View() + help
@@ -504,7 +496,7 @@ func emailView(m model) string {
     b.WriteString(fmt.Sprintf("To: %s\n", m.currentMsg.recipient))
     b.WriteString(fmt.Sprintf("Subject: %s\n", m.currentMsg.subject))
     b.WriteString(fmt.Sprintf("Date: %s\n\n", m.currentMsg.date))
-    b.WriteString(m.viewport.View()) // Display the email body
+    b.WriteString(m.viewport.View())
     b.WriteString("\n\n[b] back • [r] reply • [d] delete • [m] mark read/unread • [l] labels • [q] quit\n")
     return b.String()
 }
@@ -522,25 +514,30 @@ func loadingView(m model) string {
 }
 
 func composeView(m model) string {
-	b := strings.Builder{}
-	b.WriteString("\n  Compose New Email\n\n")
-	b.WriteString("  From: " + m.composeFrom.View() + "\n")
-	b.WriteString("  To:   " + m.composeTo.View() + "\n")
-	b.WriteString("  Subj: " + m.composeSubj.View() + "\n\n")
-	b.WriteString("  Body:\n")
-	b.WriteString(m.composeBody.View() + "\n\n")
-	b.WriteString("\n[ctrl+s] send • [tab] next field • [shift+tab] prev field • [b] back\n")
-	return b.String()
+	return fmt.Sprintf(
+		"\n  Compose New Email\n\n"+
+			"  From: %s\n"+
+			"  To:   %s\n"+
+			"  Subj: %s\n\n"+
+			"  Body:\n%s\n\n"+
+			"[ctrl+s] send • [esc] back",
+		m.composeFrom.View(),
+		m.composeTo.View(),
+		m.composeSubj.View(),
+		m.composeBody.View(),
+	)
 }
 
-
 func replyView(m model) string {
-	b := strings.Builder{}
-	b.WriteString("\n  Reply to: " + m.replyToMsg.from + "\n")
-	b.WriteString("  Subject: Re: " + m.replyToMsg.subject + "\n\n")
-	b.WriteString(m.replyBody.View() + "\n\n")
-	b.WriteString("\n[ctrl+s] send • [b] back\n")
-	return b.String()
+	return fmt.Sprintf(
+		"\n  Reply to: %s\n"+
+			"  Subject: Re: %s\n\n"+
+			"%s\n\n"+
+			"[ctrl+s] send • [esc] back",
+		m.replyToMsg.from,
+		m.replyToMsg.subject,
+		m.replyBody.View(),
+	)
 }
 
 func searchView(m model) string {
@@ -551,15 +548,15 @@ func labelsView(m model) string {
 	help := "\n[↑/↓] navigate • [enter] select • [b] back\n"
 	return m.labelsList.View() + help
 }
-// Update functions
+
 func updateInbox(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
-    var cmd tea.Cmd // Declare cmd here
+    var cmd tea.Cmd
     switch msg := msg.(type) {
     case tea.KeyMsg:
         switch {
         case key.Matches(msg, keys.Compose):
             m.state = composing
-            m.composeFrom.SetValue("me") // Default from
+            m.composeFrom.SetValue("me")
             return m, nil
 
         case key.Matches(msg, keys.Search):
@@ -599,15 +596,16 @@ func updateInbox(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
         }
     }
 
-    m.list, cmd = m.list.Update(msg) // Initialize cmd here
+    m.list, cmd = m.list.Update(msg)
     return m, cmd
 }
 
 type emailLoadErrorMsg struct {
     err error	
 }
+
 func updateViewing(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
-    var cmd tea.Cmd // Declare cmd here
+    var cmd tea.Cmd
     switch msg := msg.(type) {
     case tea.KeyMsg:
         switch {
@@ -636,66 +634,120 @@ func updateViewing(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
         }
     }
 
-    m.viewport, cmd = m.viewport.Update(msg) // Initialize cmd here
+    m.viewport, cmd = m.viewport.Update(msg)
     return m, cmd
+}
+
+func (m *model) handleTabNavigation(msg tea.KeyMsg) tea.Cmd {
+    if m.focused == 3 && m.composeBody.Focused() {
+        var cmd tea.Cmd
+        m.composeBody, cmd = m.composeBody.Update(msg)
+        return cmd
+    }
+    
+    if msg.String() == "tab" {
+        m.focused = (m.focused + 1) % 4
+    } else {
+        m.focused = (m.focused - 1 + 4) % 4
+    }
+    return m.focusField()
+}
+
+func (m *model) updateFocusedField(msg tea.Msg) tea.Cmd {
+    var cmd tea.Cmd
+    switch m.focused {
+    case 0:
+        m.composeFrom, cmd = m.composeFrom.Update(msg)
+    case 1:
+        m.composeTo, cmd = m.composeTo.Update(msg)
+    case 2:
+        m.composeSubj, cmd = m.composeSubj.Update(msg)
+    case 3:
+        m.composeBody, cmd = m.composeBody.Update(msg)
+    }
+    return cmd
 }
 
 func updateComposing(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
     var cmd tea.Cmd
-    
+
     switch msg := msg.(type) {
     case tea.KeyMsg:
         switch {
         case key.Matches(msg, keys.Back):
             m.state = inbox
             return m, nil
-            
         case key.Matches(msg, keys.Send):
-            return m, sendEmail(m.srv, m.composeTo.Value(), m.composeSubj.Value(), m.composeBody.Value())
-            
+            return m, sendEmail(
+                m.srv,
+                m.composeTo.Value(),
+                m.composeSubj.Value(),
+                m.composeBody.Value(),
+            )
         case key.Matches(msg, keys.NextInput), key.Matches(msg, keys.PrevInput):
-            // Let updateComposeFields handle these
-            return updateComposeFields(msg, &m), nil
-        }
-    }
-    
-    // Update the fields
-    newModel := updateComposeFields(msg, &m)
-    return newModel, cmd
-}
-
-func updateReplying(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
-    var cmd tea.Cmd
-    switch msg := msg.(type) {
-    case tea.KeyMsg:
-        switch {
-        case key.Matches(msg, keys.Back):
-            m.state = viewing
-            return m, nil
-
-        case key.Matches(msg, keys.Send):
-            // Format reply with original message
-            originalMessage := fmt.Sprintf("\n\n--- Original Message ---\n%s", indentText(m.currentMsg.body))
-            replyBody := m.replyBody.Value() + originalMessage
-            return m, sendEmail(m.srv, m.replyToMsg.from, "Re: "+m.replyToMsg.subject, replyBody)
+            cmd = m.handleTabNavigation(msg)
+            return m, cmd
         }
     }
 
-    m.replyBody, cmd = m.replyBody.Update(msg)
+    cmd = m.updateFocusedField(msg)
     return m, cmd
 }
 
-// Helper function to indent the original message
-func indentText(text string) string {
-    lines := strings.Split(text, "\n")
-    for i, line := range lines {
-        lines[i] = "> " + line // Add '>' to each line for indentation
+func (m *model) focusField() tea.Cmd {
+    m.composeFrom.Blur()
+    m.composeTo.Blur()
+    m.composeSubj.Blur()
+    m.composeBody.Blur()
+
+    switch m.focused {
+    case 0:
+        return m.composeFrom.Focus()
+    case 1:
+        return m.composeTo.Focus()
+    case 2:
+        return m.composeSubj.Focus()
+    case 3:
+        return m.composeBody.Focus()
     }
-    return strings.Join(lines, "\n")
+    return nil
+}
+
+func updateReplying(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch {
+		case key.Matches(msg, keys.Back):
+			m.state = viewing
+			return m, nil
+		case key.Matches(msg, keys.Send):
+			quoted := fmt.Sprintf(
+				"\n\n--- Original Message ---\nFrom: %s\nDate: %s\n\n%s",
+				m.replyToMsg.from,
+				m.replyToMsg.date,
+				indentText(m.currentMsg.body),
+			)
+			fullBody := m.replyBody.Value() + quoted
+			return m, sendEmail(m.srv, m.replyToMsg.from, "Re: "+m.replyToMsg.subject, fullBody)
+		}
+	}
+
+	m.replyBody, cmd = m.replyBody.Update(msg)
+	return m, cmd
+}
+
+func indentText(text string) string {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		lines[i] = "> " + line
+	}
+	return strings.Join(lines, "\n")
 }
 
 func updateSearching(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
-    var cmd tea.Cmd // Declare cmd here
+    var cmd tea.Cmd
     switch msg := msg.(type) {
     case tea.KeyMsg:
         switch {
@@ -713,7 +765,7 @@ func updateSearching(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
         }
     }
 
-    m.searchInput, cmd = m.searchInput.Update(msg) // Initialize cmd here
+    m.searchInput, cmd = m.searchInput.Update(msg)
     return m, cmd
 }
 
@@ -742,70 +794,6 @@ func updateLabelManagement(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func updateComposeFields(msg tea.Msg, m *model) model {
-    switch msg := msg.(type) {
-    case tea.KeyMsg:
-        switch {
-        case key.Matches(msg, keys.NextInput): // Tab key
-            m.focused = (m.focused + 1) % 4
-            // Blur all fields first
-            m.composeFrom.Blur()
-            m.composeTo.Blur()
-            m.composeSubj.Blur()
-            m.composeBody.Blur()
-            
-            // Focus the next field
-            switch m.focused {
-            case 0:
-                m.composeFrom.Focus()
-            case 1:
-                m.composeTo.Focus()
-            case 2:
-                m.composeSubj.Focus()
-            case 3:
-                m.composeBody.Focus()
-            }
-            return *m
-            
-        case key.Matches(msg, keys.PrevInput): // Shift+Tab key
-            m.focused = (m.focused - 1 + 4) % 4
-            // Blur all fields first
-            m.composeFrom.Blur()
-            m.composeTo.Blur()
-            m.composeSubj.Blur()
-            m.composeBody.Blur()
-            
-            // Focus the previous field
-            switch m.focused {
-            case 0:
-                m.composeFrom.Focus()
-            case 1:
-                m.composeTo.Focus()
-            case 2:
-                m.composeSubj.Focus()
-            case 3:
-                m.composeBody.Focus()
-            }
-            return *m
-        }
-    }
-    
-    // Update only the focused field
-    switch m.focused {
-    case 0:
-        m.composeFrom, _ = m.composeFrom.Update(msg)
-    case 1:
-        m.composeTo, _ = m.composeTo.Update(msg)
-    case 2:
-        m.composeSubj, _ = m.composeSubj.Update(msg)
-    case 3:
-        m.composeBody, _ = m.composeBody.Update(msg)
-    }
-    
-    return *m
-}
-
-// Email loading
 func loadEmail(srv *gmail.Service, msgID string) tea.Cmd {
 	return func() tea.Msg {
 		content, err := fetchFullEmailBody(srv, msgID)
@@ -843,7 +831,6 @@ func fetchFullEmailBody(srv *gmail.Service, msgID string) (string, error) {
 		from, subject, date, body), nil
 }
 
-// Email sending
 func sendEmail(srv *gmail.Service, to, subject, body string) tea.Cmd {
     return func() tea.Msg {
         msg := fmt.Sprintf("To: %s\r\nSubject: %s\r\n\r\n%s", to, subject, body)
@@ -854,15 +841,14 @@ func sendEmail(srv *gmail.Service, to, subject, body string) tea.Cmd {
         }).Do()
         
         if err != nil {
-            log.Printf("Failed to send email: %v", err)  // Log errors
+            log.Printf("Failed to send email: %v", err)
             return emailLoadErrorMsg{err: err}
         }
-        log.Println("Email sent successfully!")  // Debug log
+        log.Println("Email sent successfully!")
         return emailSentMsg{}
     }
 }
 
-// Email management
 func deleteEmail(srv *gmail.Service, msgId string) tea.Cmd {
     return func() tea.Msg {
         _, err := srv.Users.Messages.Trash("me", msgId).Do()
@@ -894,7 +880,6 @@ func toggleReadStatus(srv *gmail.Service, msgId string, isUnread bool) tea.Cmd {
 	}
 }
 
-// Search
 func performSearch(srv *gmail.Service, query string) tea.Cmd {
 	return func() tea.Msg {
 		msgs, err := srv.Users.Messages.List("me").Q(query).MaxResults(30).Do()
@@ -905,7 +890,6 @@ func performSearch(srv *gmail.Service, query string) tea.Cmd {
 	}
 }
 
-// Labels
 func loadLabels(srv *gmail.Service) tea.Cmd {
 	return func() tea.Msg {
 		labels, err := srv.Users.Labels.List("me").Do()
@@ -916,7 +900,6 @@ func loadLabels(srv *gmail.Service) tea.Cmd {
 	}
 }
 
-// Helper functions
 func formatDate(dateStr string) string {
 	formats := []string{
 		time.RFC1123Z,
@@ -997,8 +980,6 @@ func stripHTML(input string) string {
     return strings.TrimSpace(input)
 }
 
-
-// Notification message
 type notificationMsg struct {
 	message string
 }
@@ -1009,9 +990,6 @@ func showNotification(msg string) tea.Cmd {
 	}
 }
 
-
-
-// Messages
 type (
     emailLoadedMsg struct{ content string }
     emailSentMsg   struct{}
