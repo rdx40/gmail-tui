@@ -17,3 +17,7 @@ and wait till it starts
 
 ![inbox](./images/inbox.png)
 ![compose](./images/compose.png)
+![attachment sent](./images/attach_send.png)
+![attachment recieved](./images/attach_rec.png)
+
+### ps first run always takes a bit longer but after that its chill

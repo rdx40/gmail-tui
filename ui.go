@@ -7,6 +7,13 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"os"
+	"path/filepath"
+	"bytes"
+	"io/ioutil"
+	"mime"
+	"mime/multipart"
+	"net/textproto"
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
@@ -33,20 +40,22 @@ const (
 )
 
 type keyMap struct {
-	Back        key.Binding
-	Reply       key.Binding
-	Compose     key.Binding
-	Delete      key.Binding
-	Search      key.Binding
-	Labels      key.Binding
-	ToggleRead  key.Binding
-	Quit        key.Binding
-	Send        key.Binding
-	NextInput   key.Binding
-	PrevInput   key.Binding
-	ShowHelp    key.Binding
-	CloseHelp   key.Binding
-	Select      key.Binding
+	Back           key.Binding
+	Reply          key.Binding
+	Compose        key.Binding
+	Delete         key.Binding
+	Search         key.Binding
+	Labels         key.Binding
+	ToggleRead     key.Binding
+	Quit           key.Binding
+	Send           key.Binding
+	NextInput      key.Binding
+	PrevInput      key.Binding
+	ShowHelp       key.Binding
+	CloseHelp      key.Binding
+	Select         key.Binding
+	AddAttachment  key.Binding
+	RemoveAttachment key.Binding
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
@@ -60,7 +69,7 @@ func (k keyMap) FullHelp() [][]key.Binding {
 		{k.Compose, k.Reply, k.Search, k.Labels},
 		{k.Delete, k.ToggleRead, k.Back, k.Quit},
 		{k.Send, k.NextInput, k.PrevInput},
-		{k.ShowHelp, k.CloseHelp, k.Select},
+		{k.ShowHelp, k.CloseHelp, k.Select, k.AddAttachment, k.RemoveAttachment},
 	}
 }
 
@@ -102,13 +111,13 @@ var keys = keyMap{
 		key.WithHelp("ctrl+s", "send"),
 	),
 	NextInput: key.NewBinding(
-		key.WithKeys("tab"),
-		key.WithHelp("tab", "next field"),
-	),
-	PrevInput: key.NewBinding(
-		key.WithKeys("shift+tab"),
-		key.WithHelp("shift+tab", "prev field"),
-	),
+        key.WithKeys("tab"),
+        key.WithHelp("tab", "next field"),
+    ),
+    PrevInput: key.NewBinding(
+        key.WithKeys("shift+tab"),
+        key.WithHelp("shift+tab", "prev field"),
+    ),
 	ShowHelp: key.NewBinding(
 		key.WithKeys("?"),
 		key.WithHelp("?", "help"),
@@ -121,19 +130,31 @@ var keys = keyMap{
 		key.WithKeys("enter"),
 		key.WithHelp("enter", "select"),
 	),
+	AddAttachment: key.NewBinding(
+    key.WithKeys("ctrl+a"),
+    key.WithHelp("ctrl+a", "add attachment"),
+	),
+	RemoveAttachment: key.NewBinding(
+    key.WithKeys("ctrl+x"),
+    key.WithHelp("ctrl+x", "remove attachment"),
+	),
 }
 
+
 type emailItem struct {
-	id        string
-	threadId  string
-	subject   string
-	from      string
-	snippet   string
-	date      string
-	labels    []string
-	isUnread  bool
-	body      string
-	recipient string
+	id          string
+	threadId    string
+	subject     string
+	from        string
+	snippet     string
+	date        string
+	labels      []string
+	isUnread    bool
+	body        string
+	recipient   string
+	cc          string
+	bcc         string
+	attachments []*gmail.MessagePart
 }
 
 func (e emailItem) Title() string {
@@ -142,9 +163,11 @@ func (e emailItem) Title() string {
 	}
 	return "  " + e.subject
 }
+
 func (e emailItem) Description() string {
 	return fmt.Sprintf("%s - %s", e.from, e.snippet)
 }
+
 func (e emailItem) FilterValue() string { return e.subject + " " + e.from }
 
 type labelItem struct {
@@ -156,40 +179,47 @@ func (l labelItem) Description() string { return fmt.Sprintf("ID: %s", l.label.I
 func (l labelItem) FilterValue() string { return l.label.Name }
 
 type model struct {
-	state       state
-	list        list.Model
-	srv         *gmail.Service
-	fullEmail   string
-	loading     spinner.Model
-	viewport    viewport.Model
-	width       int
-	height      int
-	err         string
-	help        help.Model
-	showHelp    bool
-	composeFrom textinput.Model
-	composeTo   textinput.Model
-	composeSubj textinput.Model
-	composeBody textarea.Model
-	replyBody   textarea.Model
-	searchInput textinput.Model
-	labels      []*gmail.Label
-	labelsList  list.Model
-	currentMsg  *emailItem
-	replyToMsg  *emailItem
-	focused     int
-	searchQuery string
+	state             state
+	list              list.Model
+	srv               *gmail.Service
+	fullEmail         string
+	loading           spinner.Model
+	viewport          viewport.Model
+	width             int
+	height            int
+	err               string
+	help              help.Model
+	showHelp          bool
+	composeFrom       textinput.Model
+	composeTo         textinput.Model
+	composeCc         textinput.Model
+	composeBcc        textinput.Model
+	composeSubj       textinput.Model
+	composeBody       textarea.Model
+	replyBody         textarea.Model
+	searchInput       textinput.Model
+	labels            []*gmail.Label
+	labelsList        list.Model
+	currentMsg        *emailItem
+	replyToMsg        *emailItem
+	focused           int
+	searchQuery       string
+	composeAttachments []string
+	replyAttachments   []string
+	attachmentInput    textinput.Model
+	addingAttachment   bool
+	composeFocus int
 }
 
 func initialModel(emails []*gmail.Message, srv *gmail.Service, labels []*gmail.Label) model {
 	items := []list.Item{}
 	for _, msg := range emails {
-        item := createEmailItem(srv, msg.Id, false)
-        if item != nil {
-            items = append(items, *item)
-        }
-    }
-	
+		item := createEmailItem(srv, msg.Id, false)
+		if item != nil {
+			items = append(items, *item)
+		}
+	}
+
 	composeBody := textarea.New()
 	composeBody.Placeholder = "Compose your message here..."
 	composeBody.Focus()
@@ -201,25 +231,24 @@ func initialModel(emails []*gmail.Message, srv *gmail.Service, labels []*gmail.L
 	replyBody.Placeholder = "Type your reply here..."
 	replyBody.CharLimit = 0
 	replyBody.SetWidth(80)
-    replyBody.SetHeight(10)
+	replyBody.SetHeight(10)
 
-    delegate := list.NewDefaultDelegate()
-    delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.
-        BorderForeground(lipgloss.Color("62")).
-        Foreground(lipgloss.Color("62"))
-    delegate.Styles.SelectedDesc = delegate.Styles.SelectedTitle.Copy().
-        Foreground(lipgloss.Color("245"))
+	delegate := list.NewDefaultDelegate()
+	delegate.Styles.SelectedTitle = delegate.Styles.SelectedTitle.
+		BorderForeground(lipgloss.Color("62")).
+		Foreground(lipgloss.Color("62"))
+	delegate.Styles.SelectedDesc = delegate.Styles.SelectedTitle.Copy().
+		Foreground(lipgloss.Color("245"))
 
 	l := list.New(items, delegate, 0, 0)
-    l.Title = "Inbox"
-    l.Styles.Title = lipgloss.NewStyle().MarginLeft(2)
-    l.SetShowStatusBar(true)
-    l.SetFilteringEnabled(true)
-    l.SetShowHelp(false)
-    l.DisableQuitKeybindings()
-    l.KeyMap.Quit = key.NewBinding(key.WithKeys("q"))
-    
-    l.SetSize(0, 0)
+	l.Title = "Inbox"
+	l.Styles.Title = lipgloss.NewStyle().MarginLeft(2)
+	l.SetShowStatusBar(true)
+	l.SetFilteringEnabled(true)
+	l.SetShowHelp(false)
+	l.DisableQuitKeybindings()
+	l.KeyMap.Quit = key.NewBinding(key.WithKeys("q"))
+	l.SetSize(0, 0)
 
 	labelsList := list.New([]list.Item{}, list.NewDefaultDelegate(), 0, 0)
 	labelsList.Title = "Labels"
@@ -239,37 +268,65 @@ func initialModel(emails []*gmail.Message, srv *gmail.Service, labels []*gmail.L
 	vp.Style = lipgloss.NewStyle().Padding(0, 1)
 
 	from := textinput.New()
-	from.Placeholder = "From"
-	from.Focus()
+    from.Placeholder = "From"
+    from.Focus()
+    from.CharLimit = 100
 
 	to := textinput.New()
-	to.Placeholder = "To"
+    to.Placeholder = "To"
+    to.CharLimit = 100
 
-	subj := textinput.New()
-	subj.Placeholder = "Subject"
+    cc := textinput.New()
+    cc.Placeholder = "CC"
+    cc.CharLimit = 100
+
+
+    bcc := textinput.New()
+    bcc.Placeholder = "BCC"
+    bcc.CharLimit = 100
+
+    subj := textinput.New()
+    subj.Placeholder = "Subject"
+    subj.CharLimit = 200
+
+    bcc = textinput.New()
+    bcc.Placeholder = "BCC"
+    bcc.CharLimit = 100
+
+    subj = textinput.New()
+    subj.Placeholder = "Subject"
+    subj.CharLimit = 200
 
 	search := textinput.New()
 	search.Placeholder = "Search emails..."
+
+	attachmentInput := textinput.New()
+	attachmentInput.Placeholder = "Path to attachment..."
 
 	help := help.New()
 	help.ShowAll = false
 
 	return model{
-        state:       inbox,
-        list:        l,
-        srv:         srv,
-        loading:     s,
-        viewport:    vp,
-        help:        help,
-        composeFrom: from,
-        composeTo:   to,
-        composeSubj: subj,
-        composeBody: composeBody,
-        replyBody:   replyBody,
-        searchInput: search,
-        labels:      labels,
-        labelsList:  labelsList,
-    }
+		state:             inbox,
+		list:              l,
+		srv:               srv,
+		loading:           s,
+		viewport:          vp,
+		help:              help,
+		composeFrom:       from,
+		composeTo:         to,
+		composeCc:         cc,
+		composeBcc:        bcc,
+		composeSubj:       subj,
+		composeBody:       composeBody,
+		replyBody:         replyBody,
+		searchInput:       search,
+		labels:            labels,
+		labelsList:        labelsList,
+		attachmentInput:   attachmentInput,
+		composeAttachments: []string{},
+		replyAttachments:   []string{},
+	}
 }
 
 func (m model) Init() tea.Cmd {
@@ -303,7 +360,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
         }
         return m, nil
     // Remove the unused `cmd` declaration
-    // ...existing code...
 	case tea.KeyMsg:
 		if !m.showHelp {
 			switch {
@@ -421,84 +477,117 @@ func (m model) View() string {
 	}
 }
 
-func createEmailItem(srv *gmail.Service, msgId string, minimal bool) *emailItem {
-    if srv == nil {
-        log.Println("Gmail service is not initialized")
-        return nil
-    }
-
-    var msg *gmail.Message
-    var err error
-    
-    if minimal {
-        msg, err = srv.Users.Messages.Get("me", msgId).Format("minimal").Do()
-    } else {
-        msg, err = srv.Users.Messages.Get("me", msgId).Format("full").Do()
-    }
-    
-    if err != nil {
-        log.Printf("Error fetching message %s: %v\n", msgId, err)
-        return nil
-    }
-
-    if msg == nil {
-        log.Printf("Received nil message for ID %s\n", msgId)
-        return nil
-    }
-
-    item := &emailItem{
-        id:       msg.Id,
-        threadId: msg.ThreadId,
-        snippet:  msg.Snippet,
-    }
-
-    if msg.Payload != nil {
-        for _, h := range msg.Payload.Headers {
-            switch h.Name {
-            case "Subject":
-                item.subject = h.Value
-            case "From":
-                item.from = h.Value
-            case "Date":
-                item.date = formatDate(h.Value)
-            case "To":
-                item.recipient = h.Value
-            }
+func findAttachments(part *gmail.MessagePart) []*gmail.MessagePart {
+    var attachments []*gmail.MessagePart
+    if strings.HasPrefix(part.MimeType, "multipart/") {
+        for _, p := range part.Parts {
+            attachments = append(attachments, findAttachments(p)...)
         }
-
-        if !minimal {
-            item.body = extractPlainText(msg.Payload)
-        }
+    } else if part.Filename != "" {
+        attachments = append(attachments, part)
     }
-
-    for _, labelId := range msg.LabelIds {
-        if labelId == "UNREAD" {
-            item.isUnread = true
-        }
-        item.labels = append(item.labels, labelId)
-    }
-
-    if len(item.snippet) > 80 {
-        item.snippet = item.snippet[:77] + "..."
-    }
-
-    return item
+    return attachments
 }
+
+func createEmailItem(srv *gmail.Service, msgId string, minimal bool) *emailItem {
+	if srv == nil {
+		log.Println("Gmail service is not initialized")
+		return nil
+	}
+
+	var msg *gmail.Message
+	var err error
+
+	if minimal {
+		msg, err = srv.Users.Messages.Get("me", msgId).Format("minimal").Do()
+	} else {
+		msg, err = srv.Users.Messages.Get("me", msgId).Format("full").Do()
+	}
+
+	if err != nil {
+		log.Printf("Error fetching message %s: %v\n", msgId, err)
+		return nil
+	}
+
+	if msg == nil {
+		log.Printf("Received nil message for ID %s\n", msgId)
+		return nil
+	}
+
+	item := &emailItem{
+		id:       msg.Id,
+		threadId: msg.ThreadId,
+		snippet:  msg.Snippet,
+	}
+
+	if msg.Payload != nil {
+    for _, h := range msg.Payload.Headers {
+        switch h.Name {
+        case "Subject":
+            item.subject = h.Value
+        case "From":
+            item.from = h.Value
+        case "Date":
+            item.date = formatDate(h.Value)
+        case "To":
+            item.recipient = h.Value
+        case "Cc":
+            item.cc = h.Value
+        case "Bcc":
+            item.bcc = h.Value
+        }
+    }
+
+    if !minimal {
+        item.body = extractPlainText(msg.Payload)
+        item.attachments = findAttachments(msg.Payload)
+    }
+}
+
+	for _, labelId := range msg.LabelIds {
+		if labelId == "UNREAD" {
+			item.isUnread = true
+		}
+		item.labels = append(item.labels, labelId)
+	}
+
+	if len(item.snippet) > 80 {
+		item.snippet = item.snippet[:77] + "..."
+	}
+
+	return item
+}
+
 
 func inboxView(m model) string {
 	help := "\n[c] compose • [r] reply • [d] delete • [m] mark read/unread • [l] labels • [/] search • [?] help • [q] quit\n"
 	return m.list.View() + help
 }
 
+
 func emailView(m model) string {
-    b := strings.Builder{}
-    b.WriteString(fmt.Sprintf("\nFrom: %s\n", m.currentMsg.from))
-    b.WriteString(fmt.Sprintf("To: %s\n", m.currentMsg.recipient))
-    b.WriteString(fmt.Sprintf("Subject: %s\n", m.currentMsg.subject))
-    b.WriteString(fmt.Sprintf("Date: %s\n\n", m.currentMsg.date))
-    b.WriteString(m.viewport.View())
-    b.WriteString("\n\n[b] back • [r] reply • [d] delete • [m] mark read/unread • [l] labels • [q] quit\n")
-    return b.String()
+	b := strings.Builder{}
+	b.WriteString(fmt.Sprintf("\nFrom: %s\n", m.currentMsg.from))
+	b.WriteString(fmt.Sprintf("To: %s\n", m.currentMsg.recipient))
+	if m.currentMsg.cc != "" {
+		b.WriteString(fmt.Sprintf("CC: %s\n", m.currentMsg.cc))
+	}
+	if m.currentMsg.bcc != "" {
+		b.WriteString(fmt.Sprintf("BCC: %s\n", m.currentMsg.bcc))
+	}
+	b.WriteString(fmt.Sprintf("Subject: %s\n", m.currentMsg.subject))
+	b.WriteString(fmt.Sprintf("Date: %s\n\n", m.currentMsg.date))
+	b.WriteString(m.viewport.View())
+
+	if len(m.currentMsg.attachments) > 0 {
+		b.WriteString("\n\nAttachments:\n")
+		for i, att := range m.currentMsg.attachments {
+			b.WriteString(fmt.Sprintf("  [%d] %s (%s)\n", i+1, att.Filename, humanSize(att.Body.Size)))
+		}
+	}
+
+	b.WriteString("\n\n[b] back • [r] reply • [d] delete • [m] mark read/unread • [l] labels • [q] quit\n")
+	return b.String()
 }
 
 func loadingView(m model) string {
@@ -514,30 +603,65 @@ func loadingView(m model) string {
 }
 
 func composeView(m model) string {
-	return fmt.Sprintf(
-		"\n  Compose New Email\n\n"+
-			"  From: %s\n"+
-			"  To:   %s\n"+
-			"  Subj: %s\n\n"+
-			"  Body:\n%s\n\n"+
-			"[ctrl+s] send • [esc] back",
-		m.composeFrom.View(),
-		m.composeTo.View(),
-		m.composeSubj.View(),
-		m.composeBody.View(),
-	)
+	view := strings.Builder{}
+	view.WriteString("\n  Compose New Email\n\n")
+	view.WriteString(fmt.Sprintf("  From: %s\n", m.composeFrom.View()))
+	view.WriteString(fmt.Sprintf("  To:   %s\n", m.composeTo.View()))
+	view.WriteString(fmt.Sprintf("  CC:   %s\n", m.composeCc.View()))
+	view.WriteString(fmt.Sprintf("  BCC:  %s\n", m.composeBcc.View()))
+	view.WriteString(fmt.Sprintf("  Subj: %s\n\n", m.composeSubj.View()))
+	view.WriteString("  Body:\n" + m.composeBody.View() + "\n")
+
+	if len(m.composeAttachments) > 0 {
+		view.WriteString("\nAttachments:\n")
+		for i, f := range m.composeAttachments {
+			view.WriteString(fmt.Sprintf("  [%d] %s\n", i+1, filepath.Base(f)))
+		}
+	}
+
+	if m.addingAttachment {
+		view.WriteString("\nAttachment Path: " + m.attachmentInput.View())
+	}
+
+	view.WriteString("\n[ctrl+s] send • [ctrl+a] add attachment • [ctrl+x] remove attachment • [esc] back")
+
+	return view.String()
 }
 
 func replyView(m model) string {
-	return fmt.Sprintf(
-		"\n  Reply to: %s\n"+
-			"  Subject: Re: %s\n\n"+
-			"%s\n\n"+
-			"[ctrl+s] send • [esc] back",
-		m.replyToMsg.from,
-		m.replyToMsg.subject,
-		m.replyBody.View(),
-	)
+	view := strings.Builder{}
+	view.WriteString(fmt.Sprintf("\n  Reply to: %s\n", m.replyToMsg.from))
+	view.WriteString(fmt.Sprintf("  Subject: Re: %s\n\n", m.replyToMsg.subject))
+	view.WriteString(m.replyBody.View() + "\n")
+
+	if len(m.replyAttachments) > 0 {
+		view.WriteString("\nAttachments:\n")
+		for i, f := range m.replyAttachments {
+			view.WriteString(fmt.Sprintf("  [%d] %s\n", i+1, filepath.Base(f)))
+		}
+	}
+
+	if m.addingAttachment {
+		view.WriteString("\nAttachment Path: " + m.attachmentInput.View())
+	}
+
+	view.WriteString("\n[ctrl+s] send • [ctrl+a] add attachment • [ctrl+x] remove attachment • [esc] back")
+    return view.String()
+
+}
+
+
+func humanSize(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
 func searchView(m model) string {
@@ -675,24 +799,132 @@ func updateComposing(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
     case tea.KeyMsg:
         switch {
         case key.Matches(msg, keys.Back):
-            m.state = inbox
-            return m, nil
+            if m.addingAttachment {
+                // Cancel attachment input
+                m.addingAttachment = false
+                m.attachmentInput.Reset()
+                return m, m.focusComposeField()
+            } else {
+                m.state = inbox
+                return m, nil
+            }
+
         case key.Matches(msg, keys.Send):
             return m, sendEmail(
                 m.srv,
                 m.composeTo.Value(),
+                m.composeCc.Value(),
+                m.composeBcc.Value(),
                 m.composeSubj.Value(),
                 m.composeBody.Value(),
+                m.composeAttachments,
             )
-        case key.Matches(msg, keys.NextInput), key.Matches(msg, keys.PrevInput):
-            cmd = m.handleTabNavigation(msg)
-            return m, cmd
+
+        case key.Matches(msg, keys.AddAttachment):
+            if !m.addingAttachment {
+                m.addingAttachment = true
+                m.attachmentInput.Focus()
+                return m, nil
+            }
+
+        case key.Matches(msg, keys.RemoveAttachment):
+            if !m.addingAttachment && len(m.composeAttachments) > 0 {
+                m.composeAttachments = m.composeAttachments[:len(m.composeAttachments)-1]
+                return m, nil
+            }
+
+        case msg.Type == tea.KeyEnter && m.addingAttachment:
+            path := m.attachmentInput.Value()
+            if _, err := os.Stat(path); err == nil {
+                m.composeAttachments = append(m.composeAttachments, path)
+                m.addingAttachment = false
+                m.attachmentInput.Reset()
+                // Return focus to the body after adding attachment
+                return m, m.focusComposeField()
+            }
+            return m, nil
+
+        case key.Matches(msg, keys.NextInput):
+            if !m.addingAttachment {
+                // Only 6 fields to cycle through (0-5)
+                m.focused = (m.focused + 1) % 6
+                return m, m.focusComposeField()
+            }
+
+        case key.Matches(msg, keys.PrevInput):
+            if !m.addingAttachment {
+                m.focused = (m.focused - 1 + 6) % 6
+                return m, m.focusComposeField()
+            }
         }
     }
 
-    cmd = m.updateFocusedField(msg)
+    if m.addingAttachment {
+        m.attachmentInput, cmd = m.attachmentInput.Update(msg)
+    } else {
+        switch m.focused {
+        case 0:
+            m.composeFrom, cmd = m.composeFrom.Update(msg)
+        case 1:
+            m.composeTo, cmd = m.composeTo.Update(msg)
+        case 2:
+            m.composeCc, cmd = m.composeCc.Update(msg)
+        case 3:
+            m.composeBcc, cmd = m.composeBcc.Update(msg)
+        case 4:
+            m.composeSubj, cmd = m.composeSubj.Update(msg)
+        case 5:
+            m.composeBody, cmd = m.composeBody.Update(msg)
+        }
+    }
     return m, cmd
 }
+
+func handleComposeInput(msg tea.KeyMsg, m model) (tea.Model, tea.Cmd) {
+    var cmd tea.Cmd
+    switch m.focused {
+    case 0:
+        m.composeFrom, cmd = m.composeFrom.Update(msg)
+    case 1:
+        m.composeTo, cmd = m.composeTo.Update(msg)
+    case 2:
+        m.composeCc, cmd = m.composeCc.Update(msg)
+    case 3:
+        m.composeBcc, cmd = m.composeBcc.Update(msg)
+    case 4:
+        m.composeSubj, cmd = m.composeSubj.Update(msg)
+    case 5:
+        m.composeBody, cmd = m.composeBody.Update(msg)
+    }
+    return m, cmd
+}
+
+
+func (m *model) focusComposeField() tea.Cmd {
+    m.composeFrom.Blur()
+    m.composeTo.Blur()
+    m.composeCc.Blur()
+    m.composeBcc.Blur()
+    m.composeSubj.Blur()
+    m.composeBody.Blur()
+
+    switch m.focused {
+    case 0:
+        return m.composeFrom.Focus()
+    case 1:
+        return m.composeTo.Focus()
+    case 2:
+        return m.composeCc.Focus()
+    case 3:
+        return m.composeBcc.Focus()
+    case 4:
+        return m.composeSubj.Focus()
+    case 5:
+        return m.composeBody.Focus()
+    }
+    return nil
+}
+
 
 func (m *model) focusField() tea.Cmd {
     m.composeFrom.Blur()
@@ -721,7 +953,9 @@ func updateReplying(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
 		switch {
 		case key.Matches(msg, keys.Back):
 			m.state = viewing
+			m.addingAttachment = false
 			return m, nil
+
 		case key.Matches(msg, keys.Send):
 			quoted := fmt.Sprintf(
 				"\n\n--- Original Message ---\nFrom: %s\nDate: %s\n\n%s",
@@ -730,13 +964,46 @@ func updateReplying(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
 				indentText(m.currentMsg.body),
 			)
 			fullBody := m.replyBody.Value() + quoted
-			return m, sendEmail(m.srv, m.replyToMsg.from, "Re: "+m.replyToMsg.subject, fullBody)
+			return m, sendEmail(
+				m.srv,
+				m.replyToMsg.from,
+				"",
+				"",
+				"Re: "+m.replyToMsg.subject,
+				fullBody,
+				m.replyAttachments,
+			)
+
+		case key.Matches(msg, keys.AddAttachment):
+			m.addingAttachment = true
+			m.attachmentInput.Focus()
+			return m, nil
+
+		case key.Matches(msg, keys.RemoveAttachment):
+			if len(m.replyAttachments) > 0 {
+				m.replyAttachments = m.replyAttachments[:len(m.replyAttachments)-1]
+			}
+			return m, nil
+
+		case msg.Type == tea.KeyEnter && m.addingAttachment:
+			path := m.attachmentInput.Value()
+			if _, err := os.Stat(path); err == nil {
+				m.replyAttachments = append(m.replyAttachments, path)
+				m.addingAttachment = false
+				m.attachmentInput.Reset()
+			}
+			return m, nil
 		}
 	}
 
-	m.replyBody, cmd = m.replyBody.Update(msg)
+	if m.addingAttachment {
+		m.attachmentInput, cmd = m.attachmentInput.Update(msg)
+	} else {
+		m.replyBody, cmd = m.replyBody.Update(msg)
+	}
 	return m, cmd
 }
+
 
 func indentText(text string) string {
 	lines := strings.Split(text, "\n")
@@ -831,23 +1098,76 @@ func fetchFullEmailBody(srv *gmail.Service, msgID string) (string, error) {
 		from, subject, date, body), nil
 }
 
-func sendEmail(srv *gmail.Service, to, subject, body string) tea.Cmd {
-    return func() tea.Msg {
-        msg := fmt.Sprintf("To: %s\r\nSubject: %s\r\n\r\n%s", to, subject, body)
-        raw := base64.URLEncoding.EncodeToString([]byte(msg))
-        
-        _, err := srv.Users.Messages.Send("me", &gmail.Message{
-            Raw: raw,
-        }).Do()
-        
-        if err != nil {
-            log.Printf("Failed to send email: %v", err)
-            return emailLoadErrorMsg{err: err}
-        }
-        log.Println("Email sent successfully!")
-        return emailSentMsg{}
-    }
+func sendEmail(srv *gmail.Service, to, cc, bcc, subject, body string, attachments []string) tea.Cmd {
+	return func() tea.Msg {
+		var msg bytes.Buffer
+		msg.WriteString(fmt.Sprintf("To: %s\r\n", to))
+		if cc != "" {
+			msg.WriteString(fmt.Sprintf("Cc: %s\r\n", cc))
+		}
+		if bcc != "" {
+			msg.WriteString(fmt.Sprintf("Bcc: %s\r\n", bcc))
+		}
+		msg.WriteString(fmt.Sprintf("Subject: %s\r\n", subject))
+
+		if len(attachments) == 0 {
+			// Simple message without attachments
+			msg.WriteString("\r\n" + body)
+			raw := base64.URLEncoding.EncodeToString(msg.Bytes())
+			_, err := srv.Users.Messages.Send("me", &gmail.Message{Raw: raw}).Do()
+			if err != nil {
+				return emailLoadErrorMsg{err: err}
+			}
+			return emailSentMsg{}
+		}
+
+		// Multipart message with attachments
+		var buf bytes.Buffer
+		writer := multipart.NewWriter(&buf)
+		boundary := writer.Boundary()
+
+		msg.WriteString(fmt.Sprintf("MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=%s\r\n\r\n", boundary))
+		msg.WriteString(fmt.Sprintf("--%s\r\n", boundary))
+		msg.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
+		msg.WriteString(body + "\r\n")
+
+		// Write the message buffer first
+		buf.Write(msg.Bytes())
+
+		// Add attachments
+		for _, file := range attachments {
+			content, err := ioutil.ReadFile(file)
+			if err != nil {
+				return emailLoadErrorMsg{err: fmt.Errorf("failed to read attachment: %w", err)}
+			}
+
+			partHeader := textproto.MIMEHeader{}
+			partHeader.Set("Content-Type", mime.TypeByExtension(filepath.Ext(file)))
+			partHeader.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filepath.Base(file)))
+			partHeader.Set("Content-Transfer-Encoding", "base64")
+
+			partWriter, err := writer.CreatePart(partHeader)
+			if err != nil {
+				return emailLoadErrorMsg{err: fmt.Errorf("failed to create attachment part: %w", err)}
+			}
+
+			encoder := base64.NewEncoder(base64.StdEncoding, partWriter)
+			if _, err := encoder.Write(content); err != nil {
+				return emailLoadErrorMsg{err: fmt.Errorf("failed to write attachment: %w", err)}
+			}
+			encoder.Close()
+		}
+
+		writer.Close()
+		raw := base64.URLEncoding.EncodeToString(buf.Bytes())
+		_, err := srv.Users.Messages.Send("me", &gmail.Message{Raw: raw}).Do()
+		if err != nil {
+			return emailLoadErrorMsg{err: err}
+		}
+		return emailSentMsg{}
+	}
 }
+
 
 func deleteEmail(srv *gmail.Service, msgId string) tea.Cmd {
     return func() tea.Msg {
