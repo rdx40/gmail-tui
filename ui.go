@@ -111,13 +111,13 @@ var keys = keyMap{
 		key.WithHelp("ctrl+s", "send"),
 	),
 	NextInput: key.NewBinding(
-		key.WithKeys("tab"),
-		key.WithHelp("tab", "next field"),
-	),
-	PrevInput: key.NewBinding(
-		key.WithKeys("shift+tab"),
-		key.WithHelp("shift+tab", "prev field"),
-	),
+        key.WithKeys("tab"),
+        key.WithHelp("tab", "next field"),
+    ),
+    PrevInput: key.NewBinding(
+        key.WithKeys("shift+tab"),
+        key.WithHelp("shift+tab", "prev field"),
+    ),
 	ShowHelp: key.NewBinding(
 		key.WithKeys("?"),
 		key.WithHelp("?", "help"),
@@ -131,12 +131,12 @@ var keys = keyMap{
 		key.WithHelp("enter", "select"),
 	),
 	AddAttachment: key.NewBinding(
-		key.WithKeys("a"),
-		key.WithHelp("a", "add attachment"),
+    key.WithKeys("ctrl+a"),
+    key.WithHelp("ctrl+a", "add attachment"),
 	),
 	RemoveAttachment: key.NewBinding(
-		key.WithKeys("x"),
-		key.WithHelp("x", "remove attachment"),
+    key.WithKeys("ctrl+x"),
+    key.WithHelp("ctrl+x", "remove attachment"),
 	),
 }
 
@@ -208,6 +208,7 @@ type model struct {
 	replyAttachments   []string
 	attachmentInput    textinput.Model
 	addingAttachment   bool
+	composeFocus int
 }
 
 func initialModel(emails []*gmail.Message, srv *gmail.Service, labels []*gmail.Label) model {
@@ -267,20 +268,34 @@ func initialModel(emails []*gmail.Message, srv *gmail.Service, labels []*gmail.L
 	vp.Style = lipgloss.NewStyle().Padding(0, 1)
 
 	from := textinput.New()
-	from.Placeholder = "From"
-	from.Focus()
+    from.Placeholder = "From"
+    from.Focus()
+    from.CharLimit = 100
 
 	to := textinput.New()
-	to.Placeholder = "To"
+    to.Placeholder = "To"
+    to.CharLimit = 100
 
-	cc := textinput.New()
-	cc.Placeholder = "CC"
+    cc := textinput.New()
+    cc.Placeholder = "CC"
+    cc.CharLimit = 100
 
-	bcc := textinput.New()
-	bcc.Placeholder = "BCC"
 
-	subj := textinput.New()
-	subj.Placeholder = "Subject"
+    bcc := textinput.New()
+    bcc.Placeholder = "BCC"
+    bcc.CharLimit = 100
+
+    subj := textinput.New()
+    subj.Placeholder = "Subject"
+    subj.CharLimit = 200
+
+    bcc = textinput.New()
+    bcc.Placeholder = "BCC"
+    bcc.CharLimit = 100
+
+    subj = textinput.New()
+    subj.Placeholder = "Subject"
+    subj.CharLimit = 200
 
 	search := textinput.New()
 	search.Placeholder = "Search emails..."
@@ -608,7 +623,8 @@ func composeView(m model) string {
 		view.WriteString("\nAttachment Path: " + m.attachmentInput.View())
 	}
 
-	view.WriteString("\n[ctrl+s] send • [a] add attachment • [x] remove attachment • [esc] back")
+	view.WriteString("\n[ctrl+s] send • [ctrl+a] add attachment • [ctrl+x] remove attachment • [esc] back")
+
 	return view.String()
 }
 
@@ -629,8 +645,9 @@ func replyView(m model) string {
 		view.WriteString("\nAttachment Path: " + m.attachmentInput.View())
 	}
 
-	view.WriteString("\n[ctrl+s] send • [a] add attachment • [x] remove attachment • [esc] back")
-	return view.String()
+	view.WriteString("\n[ctrl+s] send • [ctrl+a] add attachment • [ctrl+x] remove attachment • [esc] back")
+    return view.String()
+
 }
 
 
@@ -776,61 +793,136 @@ func (m *model) updateFocusedField(msg tea.Msg) tea.Cmd {
 }
 
 func updateComposing(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
+    var cmd tea.Cmd
 
-	switch msg := msg.(type) {
-	case tea.KeyMsg:
-		switch {
-		case key.Matches(msg, keys.Back):
-			m.state = inbox
-			m.addingAttachment = false
-			return m, nil
+    switch msg := msg.(type) {
+    case tea.KeyMsg:
+        switch {
+        case key.Matches(msg, keys.Back):
+            if m.addingAttachment {
+                // Cancel attachment input
+                m.addingAttachment = false
+                m.attachmentInput.Reset()
+                return m, m.focusComposeField()
+            } else {
+                m.state = inbox
+                return m, nil
+            }
 
-		case key.Matches(msg, keys.Send):
-			return m, sendEmail(
-				m.srv,
-				m.composeTo.Value(),
-				m.composeCc.Value(),
-				m.composeBcc.Value(),
-				m.composeSubj.Value(),
-				m.composeBody.Value(),
-				m.composeAttachments,
-			)
+        case key.Matches(msg, keys.Send):
+            return m, sendEmail(
+                m.srv,
+                m.composeTo.Value(),
+                m.composeCc.Value(),
+                m.composeBcc.Value(),
+                m.composeSubj.Value(),
+                m.composeBody.Value(),
+                m.composeAttachments,
+            )
 
-		case key.Matches(msg, keys.AddAttachment):
-			m.addingAttachment = true
-			m.attachmentInput.Focus()
-			return m, nil
+        case key.Matches(msg, keys.AddAttachment):
+            if !m.addingAttachment {
+                m.addingAttachment = true
+                m.attachmentInput.Focus()
+                return m, nil
+            }
 
-		case key.Matches(msg, keys.RemoveAttachment):
-			if len(m.composeAttachments) > 0 {
-				m.composeAttachments = m.composeAttachments[:len(m.composeAttachments)-1]
-			}
-			return m, nil
+        case key.Matches(msg, keys.RemoveAttachment):
+            if !m.addingAttachment && len(m.composeAttachments) > 0 {
+                m.composeAttachments = m.composeAttachments[:len(m.composeAttachments)-1]
+                return m, nil
+            }
 
-		case msg.Type == tea.KeyEnter && m.addingAttachment:
-			path := m.attachmentInput.Value()
-			if _, err := os.Stat(path); err == nil {
-				m.composeAttachments = append(m.composeAttachments, path)
-				m.addingAttachment = false
-				m.attachmentInput.Reset()
-			}
-			return m, nil
+        case msg.Type == tea.KeyEnter && m.addingAttachment:
+            path := m.attachmentInput.Value()
+            if _, err := os.Stat(path); err == nil {
+                m.composeAttachments = append(m.composeAttachments, path)
+                m.addingAttachment = false
+                m.attachmentInput.Reset()
+                // Return focus to the body after adding attachment
+                return m, m.focusComposeField()
+            }
+            return m, nil
 
-		case key.Matches(msg, keys.NextInput), key.Matches(msg, keys.PrevInput):
-			if !m.addingAttachment {
-				cmd = m.handleTabNavigation(msg)
-			}
-			return m, cmd
-		}
-	}
+        case key.Matches(msg, keys.NextInput):
+            if !m.addingAttachment {
+                // Only 6 fields to cycle through (0-5)
+                m.focused = (m.focused + 1) % 6
+                return m, m.focusComposeField()
+            }
 
-	if m.addingAttachment {
-		m.attachmentInput, cmd = m.attachmentInput.Update(msg)
-	} else {
-		cmd = m.updateFocusedField(msg)
-	}
-	return m, cmd
+        case key.Matches(msg, keys.PrevInput):
+            if !m.addingAttachment {
+                m.focused = (m.focused - 1 + 6) % 6
+                return m, m.focusComposeField()
+            }
+        }
+    }
+
+    if m.addingAttachment {
+        m.attachmentInput, cmd = m.attachmentInput.Update(msg)
+    } else {
+        switch m.focused {
+        case 0:
+            m.composeFrom, cmd = m.composeFrom.Update(msg)
+        case 1:
+            m.composeTo, cmd = m.composeTo.Update(msg)
+        case 2:
+            m.composeCc, cmd = m.composeCc.Update(msg)
+        case 3:
+            m.composeBcc, cmd = m.composeBcc.Update(msg)
+        case 4:
+            m.composeSubj, cmd = m.composeSubj.Update(msg)
+        case 5:
+            m.composeBody, cmd = m.composeBody.Update(msg)
+        }
+    }
+    return m, cmd
+}
+
+func handleComposeInput(msg tea.KeyMsg, m model) (tea.Model, tea.Cmd) {
+    var cmd tea.Cmd
+    switch m.focused {
+    case 0:
+        m.composeFrom, cmd = m.composeFrom.Update(msg)
+    case 1:
+        m.composeTo, cmd = m.composeTo.Update(msg)
+    case 2:
+        m.composeCc, cmd = m.composeCc.Update(msg)
+    case 3:
+        m.composeBcc, cmd = m.composeBcc.Update(msg)
+    case 4:
+        m.composeSubj, cmd = m.composeSubj.Update(msg)
+    case 5:
+        m.composeBody, cmd = m.composeBody.Update(msg)
+    }
+    return m, cmd
+}
+
+
+func (m *model) focusComposeField() tea.Cmd {
+    m.composeFrom.Blur()
+    m.composeTo.Blur()
+    m.composeCc.Blur()
+    m.composeBcc.Blur()
+    m.composeSubj.Blur()
+    m.composeBody.Blur()
+
+    switch m.focused {
+    case 0:
+        return m.composeFrom.Focus()
+    case 1:
+        return m.composeTo.Focus()
+    case 2:
+        return m.composeCc.Focus()
+    case 3:
+        return m.composeBcc.Focus()
+    case 4:
+        return m.composeSubj.Focus()
+    case 5:
+        return m.composeBody.Focus()
+    }
+    return nil
 }
 
 
