@@ -14,9 +14,13 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/textproto"
+	"strconv"
+    "unicode"
+
 
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
@@ -56,6 +60,7 @@ type keyMap struct {
 	Select         key.Binding
 	AddAttachment  key.Binding
 	RemoveAttachment key.Binding
+	DownloadAttachment key.Binding
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
@@ -138,6 +143,10 @@ var keys = keyMap{
     key.WithKeys("ctrl+x"),
     key.WithHelp("ctrl+x", "remove attachment"),
 	),
+	DownloadAttachment: key.NewBinding(
+    key.WithKeys("a"),
+    key.WithHelp("a", "download attachment"),
+	),
 }
 
 
@@ -209,6 +218,9 @@ type model struct {
 	attachmentInput    textinput.Model
 	addingAttachment   bool
 	composeFocus int
+	attachmentDownloading bool
+	downloadingIndex      int
+
 }
 
 func initialModel(emails []*gmail.Message, srv *gmail.Service, labels []*gmail.Label) model {
@@ -289,14 +301,6 @@ func initialModel(emails []*gmail.Message, srv *gmail.Service, labels []*gmail.L
     subj.Placeholder = "Subject"
     subj.CharLimit = 200
 
-    bcc = textinput.New()
-    bcc.Placeholder = "BCC"
-    bcc.CharLimit = 100
-
-    subj = textinput.New()
-    subj.Placeholder = "Subject"
-    subj.CharLimit = 200
-
 	search := textinput.New()
 	search.Placeholder = "Search emails..."
 
@@ -343,6 +347,43 @@ func loadEmailsByLabel(srv *gmail.Service, labelID string) tea.Cmd {
 	}
 }
 
+
+func downloadAttachment(srv *gmail.Service, msgID string, attachment *gmail.MessagePart) tea.Cmd {
+    return func() tea.Msg {
+        att, err := srv.Users.Messages.Attachments.Get("me", msgID, attachment.Body.AttachmentId).Do()
+        if err != nil {
+            return notificationMsg{message: fmt.Sprintf("Download failed: %v", err)}
+        }
+
+        data, err := base64.URLEncoding.DecodeString(att.Data)
+        if err != nil {
+            data, err = base64.StdEncoding.DecodeString(att.Data)
+            if err != nil {
+                return notificationMsg{message: "Failed to decode attachment"}
+            }
+        }
+
+        filename := sanitizeFilename(attachment.Filename)
+        if err := os.WriteFile(filename, data, 0644); err != nil {
+            return notificationMsg{message: fmt.Sprintf("Save failed: %v", err)}
+        }
+
+        return attachmentDownloadedMsg{filename: filename}
+    }
+}
+
+func sanitizeFilename(name string) string {
+    return strings.Map(func(r rune) rune {
+        if unicode.IsSpace(r) || unicode.IsLetter(r) || unicode.IsNumber(r) || 
+           r == '-' || r == '_' || r == '.' {
+            return r
+        }
+        return '_'
+    }, name)
+}
+
+
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
     var cmds []tea.Cmd
 
@@ -359,98 +400,121 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
             m.viewport.Height = msg.Height - 7
         }
         return m, nil
-    // Remove the unused `cmd` declaration
-	case tea.KeyMsg:
-		if !m.showHelp {
-			switch {
-			case key.Matches(msg, keys.ShowHelp):
-				m.showHelp = true
-				return m, nil
-			}
-		} else {
-			switch {
-			case key.Matches(msg, keys.CloseHelp):
-				m.showHelp = false
-				return m, nil
-			}
-		}
 
-		switch m.state {
-		case inbox:
-			return updateInbox(msg, m)
-		case viewing:
-			return updateViewing(msg, m)
-		case composing:
-			return updateComposing(msg, m)
-		case replying:
-			return updateReplying(msg, m)
-		case searching:
-			return updateSearching(msg, m)
-		case managingLabels:
-			return updateLabelManagement(msg, m)
-		}
+    case tea.KeyMsg:
+        if !m.showHelp {
+            switch {
+            case key.Matches(msg, keys.ShowHelp):
+                m.showHelp = true
+                return m, nil
+            }
+        } else {
+            switch {
+            case key.Matches(msg, keys.CloseHelp):
+                m.showHelp = false
+                return m, nil
+            }
+        }
 
-	case emailLoadedMsg:
-		m.state = viewing
-		m.fullEmail = msg.content
-		m.viewport.Width = m.width
-		m.viewport.Height = m.height - 7
-		m.viewport.SetContent(m.fullEmail)
-		return m, nil
+        if m.state == viewing && m.attachmentDownloading {
+            switch {
+            case key.Matches(msg, keys.Back):
+                m.attachmentDownloading = false
+                return m, nil
+            case msg.Type == tea.KeyRunes:
+    			if digit, err := strconv.Atoi(string(msg.Runes)); err == nil {
+    			    if digit > 0 && digit <= len(m.currentMsg.attachments) {
+    			        return m, downloadAttachment(
+    			            m.srv, 
+    			            m.currentMsg.id, 
+    			            m.currentMsg.attachments[digit-1],
+    			        )
+    			    }
+    			}
+            }
+        }
 
-	case emailSentMsg:
-		m.state = inbox
-		m.viewport.GotoTop()
-		return m, tea.Batch(showNotification("Email sent successfully!"))
+        switch m.state {
+        case inbox:
+            return updateInbox(msg, m)
+        case viewing:
+            return updateViewing(msg, m)
+        case composing:
+            return updateComposing(msg, m)
+        case replying:
+            return updateReplying(msg, m)
+        case searching:
+            return updateSearching(msg, m)
+        case managingLabels:
+            return updateLabelManagement(msg, m)
+        }
 
-	case labelsLoadedMsg:
-		items := make([]list.Item, len(msg.labels))
-		for i, label := range msg.labels {
-			items[i] = labelItem{label: label}
-		}
-		m.labels = msg.labels
-		m.labelsList.SetItems(items)
-		m.state = managingLabels
-		return m, nil
+    case emailLoadedMsg:
+        m.state = viewing
+        m.fullEmail = msg.content
+        m.viewport.Width = m.width
+        m.viewport.Height = m.height - 7
+        m.viewport.SetContent(m.fullEmail)
+        return m, nil
 
-	case searchResultMsg:
-		items := []list.Item{}
-		for _, msg := range msg.messages {
-			item := createEmailItem(m.srv, msg.Id, true)
-			if item != nil {
-				items = append(items, *item)
-			}
-		}
-		m.list.SetItems(items)
-		m.state = inbox
-		return m, nil
-	}
+    case emailSentMsg:
+        m.state = inbox
+        m.viewport.GotoTop()
+        return m, tea.Batch(showNotification("Email sent successfully!"))
 
-	switch m.state {
-	case loading:
-		var cmd tea.Cmd
-		m.loading, cmd = m.loading.Update(msg)
-		cmds = append(cmds, cmd)
-	case viewing:
-		var cmd tea.Cmd
-		m.viewport, cmd = m.viewport.Update(msg)
-		cmds = append(cmds, cmd)
-	case replying:
-		var cmd tea.Cmd
-		m.replyBody, cmd = m.replyBody.Update(msg)
-		cmds = append(cmds, cmd)
-	case searching:
-		var cmd tea.Cmd
-		m.searchInput, cmd = m.searchInput.Update(msg)
-		cmds = append(cmds, cmd)
-	case managingLabels:
-		var cmd tea.Cmd
-		m.labelsList, cmd = m.labelsList.Update(msg)
-		cmds = append(cmds, cmd)
-	}
+    case labelsLoadedMsg:
+        items := make([]list.Item, len(msg.labels))
+        for i, label := range msg.labels {
+            items[i] = labelItem{label: label}
+        }
+        m.labels = msg.labels
+        m.labelsList.SetItems(items)
+        m.state = managingLabels
+        return m, nil
 
-	return m, tea.Batch(cmds...)
+    case searchResultMsg:
+        items := []list.Item{}
+        for _, msg := range msg.messages {
+            item := createEmailItem(m.srv, msg.Id, true)
+            if item != nil {
+                items = append(items, *item)
+            }
+        }
+        m.list.SetItems(items)
+        m.state = inbox
+        return m, nil
+
+    case attachmentDownloadedMsg:
+        return m, showNotification(fmt.Sprintf("Downloaded: %s", msg.filename))
+    }
+
+    // Handle other states
+    switch m.state {
+    case loading:
+        var cmd tea.Cmd
+        m.loading, cmd = m.loading.Update(msg)
+        cmds = append(cmds, cmd)
+    case viewing:
+        var cmd tea.Cmd
+        m.viewport, cmd = m.viewport.Update(msg)
+        cmds = append(cmds, cmd)
+    case replying:
+        var cmd tea.Cmd
+        m.replyBody, cmd = m.replyBody.Update(msg)
+        cmds = append(cmds, cmd)
+    case searching:
+        var cmd tea.Cmd
+        m.searchInput, cmd = m.searchInput.Update(msg)
+        cmds = append(cmds, cmd)
+    case managingLabels:
+        var cmd tea.Cmd
+        m.labelsList, cmd = m.labelsList.Update(msg)
+        cmds = append(cmds, cmd)
+    }
+
+    return m, tea.Batch(cmds...)
 }
+
 
 func (m model) View() string {
 	if m.showHelp {
@@ -575,6 +639,9 @@ func emailView(m model) string {
 	if m.currentMsg.bcc != "" {
 		b.WriteString(fmt.Sprintf("BCC: %s\n", m.currentMsg.bcc))
 	}
+	if m.attachmentDownloading {
+    	b.WriteString("\n\nDownload which attachment? (1-9) [esc] cancel")
+	}
 	b.WriteString(fmt.Sprintf("Subject: %s\n", m.currentMsg.subject))
 	b.WriteString(fmt.Sprintf("Date: %s\n\n", m.currentMsg.date))
 	b.WriteString(m.viewport.View())
@@ -586,7 +653,7 @@ func emailView(m model) string {
 		}
 	}
 
-	b.WriteString("\n\n[b] back • [r] reply • [d] delete • [m] mark read/unread • [l] labels • [q] quit\n")
+	b.WriteString("\n\n[b] back • [r] reply • [d] delete • [m] mark read/unread • [a] download attachment • [q] quit\n")
 	return b.String()
 }
 
@@ -727,6 +794,10 @@ func updateInbox(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
 type emailLoadErrorMsg struct {
     err error	
 }
+type attachmentDownloadedMsg struct{
+	filename string
+}
+
 
 func updateViewing(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
     var cmd tea.Cmd
@@ -756,6 +827,14 @@ func updateViewing(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
         case key.Matches(msg, keys.Quit):
             return m, tea.Quit
         }
+		case key.Matches(msg, keys.DownloadAttachment):
+    	    if len(m.currentMsg.attachments) == 0 {
+    	        return m, showNotification("No attachments available")
+    	    }
+    	    m.attachmentDownloading = true
+    	    m.downloadingIndex = 0
+    	    return m, showNotification("Select attachment to download (1-9)")
+    	}
     }
 
     m.viewport, cmd = m.viewport.Update(msg)
@@ -846,7 +925,6 @@ func updateComposing(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
 
         case key.Matches(msg, keys.NextInput):
             if !m.addingAttachment {
-                // Only 6 fields to cycle through (0-5)
                 m.focused = (m.focused + 1) % 6
                 return m, m.focusComposeField()
             }
