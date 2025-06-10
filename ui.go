@@ -26,7 +26,6 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
   	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"google.golang.org/api/gmail/v1"
 )
@@ -826,7 +825,7 @@ func updateViewing(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
 
         case key.Matches(msg, keys.Quit):
             return m, tea.Quit
-        }
+		
 		case key.Matches(msg, keys.DownloadAttachment):
     	    if len(m.currentMsg.attachments) == 0 {
     	        return m, showNotification("No attachments available")
@@ -834,10 +833,9 @@ func updateViewing(msg tea.Msg, m model) (tea.Model, tea.Cmd) {
     	    m.attachmentDownloading = true
     	    m.downloadingIndex = 0
     	    return m, showNotification("Select attachment to download (1-9)")
-    	}
-    }
-
-    m.viewport, cmd = m.viewport.Update(msg)
+		}
+	}
+	m.viewport, cmd = m.viewport.Update(msg)
     return m, cmd
 }
 
