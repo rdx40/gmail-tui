@@ -3,7 +3,6 @@ like compose a mail
 read a mail
 reply to a mail
 
-Update (9th June) : Attachments have successfully been added
 
 
 
@@ -31,7 +30,7 @@ go run .
 
 
 
-
+### Note on downloading attachments recieved from an email -> Check a downloads folder created in the same directory
 
 
 
