@@ -5,7 +5,35 @@ reply to a mail
 
 Update (9th June) : Attachments have successfully been added
 
+
+
 replace the credential.json with yours and
+
+
+## To test out the application 
+- Go to google cloud console
+- Add a project name it whatver eg. Gmail-TUI
+- APIs and Services
+- Library
+- Gmail API
+- Enable create an oauth2 token
+- Download the credentials.json
+- Replaces the placeholder credentials.json in this project with the downlaoded contents
+- ```bash
+  go mod tidy
+  (OR)
+  go install
+  ```
+- from the project root run
+```bash
+go run .
+```
+
+
+
+
+
+
 
 ```bash
 go run .
