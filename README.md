@@ -1,46 +1,42 @@
-Currently only the basic functionality work
-like compose a mail
-read a mail
-reply to a mail
+## To test it out
 
+### Step 1: Create a Project in Google Cloud Console
 
+- Go to the Google Cloud Console
+- Click the project dropdown (top-left) > New Project
+- Enter a project name (e.g., "Gmail-TUI") > Create
 
+### Step 2: Enable Gmail API
 
-replace the credential.json with yours and
+- In the Cloud Console sidebar, navigate to APIs & Services > Library
+- Search for "Gmail API" and select it
+- Click Enable
 
+### Step 3: Configure OAuth Consent Screen
 
-## To test out the application 
-- Go to google cloud console
-- Add a project name it whatver eg. Gmail-TUI
-- APIs and Services
-- Library
-- Gmail API
-- Enable create an oauth2 token
-- Download the credentials.json
-- Replaces the placeholder credentials.json in this project with the downlaoded contents
-- ```bash
-  go mod tidy
-  (OR)
-  go install
-  ```
-- from the project root run
+- Go to APIs & Services > OAuth consent screen
+- In Audience Enter your email as test user
+- Add all the fmail andrequired scopes in `Data Acess`
+- Create a client
+- Download the json and save as credentials.json in repo root
+
+### Step 4: First-Time Authorization
+
+- Run your application with:
+
 ```bash
+go mod tidy
 go run .
 ```
 
-
+- It will:
+- Open a browser window asking you to log in to Google
+- Show a warning screen (click Continue)
+- Grant permission to your app
+- Then `CHECK URL FOR CODE AND THEN INPUT TO PROMPT IN TERMINAL`
+- This will generate a `~/.gmail-tui-token.json` file for future authentications
 
 ### Note on downloading attachments recieved from an email -> Check a downloads folder created in the same directory
-
-
-
-```bash
-go run .
-```
-
-and wait till it starts
-
-## how it looks:
 
 ![inbox](./images/inbox.png)
 ![compose](./images/compose.png)
